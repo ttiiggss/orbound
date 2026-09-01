@@ -319,7 +319,6 @@ function handleFireShot(ws, msg, clientRoomInfo) {
     // TODO: Check charge requirement for SS
 
     // Broadcast shot fired to all clients
-    console.log(`[fireShot] ${playerId} fired, roomCode=${clientRoomInfo.roomCode}`);
     room.shotInProgress = { playerId, angle, power, slot, shooterWs: ws };
     for (const player of Object.values(room.players)) {
       if (!player.ws || !player.connected) continue;
@@ -350,9 +349,7 @@ function handleShotResult(ws, msg, clientRoomInfo) {
     if (!room || room.status !== 'in_progress') return;
 
     // Verify sender is the one who just fired
-    console.log(`[shotResult] sender=${clientRoomInfo.playerId}, shotInProgress=${room.shotInProgress ? room.shotInProgress.playerId : 'null'}`);
     if (!room.shotInProgress || room.shotInProgress.playerId !== clientRoomInfo.playerId) {
-      console.log(`[shotResult] REJECTED: mismatch or no shot in progress`);
       ws.send(JSON.stringify({ type: 'error', message: 'shot_result from non-shooter' }));
       return;
     }
