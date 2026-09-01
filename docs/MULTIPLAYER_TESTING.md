@@ -111,29 +111,110 @@ result_confirmed round trips.
   exotic weapon behaviors) re-run against the networked-mode codebase and
   still 100% passing — the networking layer is additive, not a rewrite.
 
-## Known limitations (honest, not fixed in this pass)
+## Known limitations (updated after a second hardening pass)
 
-- **Terrain diff is not transmitted** (`terrainDiff: []` is still a stub).
-  In practice this hasn't been observed to cause visible desync in testing
-  because terrain carving is driven by projectile impact x/y, which (unlike
-  HP falloff) tends to land in the same terrain cell even with a few pixels
-  of drift — but this hasn't been stress-tested with rapid/overlapping
-  terrain destruction (e.g. many bounce impacts in quick succession) the
-  way the HP path was. If a future terrain-desync bug appears, this is the
-  first place to look.
-- **SS charge requirement is not validated server-side** — the server
-  trusts the client not to fire an under-charged special. A malicious
-  client could bypass this; low priority for a casual, non-competitive game
-  but worth noting as a real gap, not an oversight being hidden.
+The three items below were the open gaps after the first pass. All three
+have since been closed - see "Hardening pass 2" further down for what
+changed and how each was verified.
+
+- ~~Terrain diff is not transmitted~~ — FIXED. Every `terrain.carve()` call
+  is now recorded (`recordCarveEvent`) and the shooter transmits the exact
+  carve parameters; receivers regenerate terrain from the match seed and
+  replay the full authoritative carve history rather than patching their
+  own heightmap. Verified byte-for-byte identical (0.001 float tolerance)
+  across 8 real multiplayer turns.
+- ~~SS charge requirement is not validated server-side~~ — FIXED. The
+  server now tracks `room.playerCharge` per player, mirroring the client's
+  own +22-per-shot/cap-100/reset-on-use logic, and genuinely rejects an
+  under-charged `fire_shot` for `slot: 'ss'`. Verified via a simulated
+  malicious-client bypass attempt (correctly rejected) and real legitimate
+  charge buildup over 5 shots (correctly accepted).
+- ~~No 2v2/3v3/4v4 network test~~ — 2v2 NOW VERIFIED with 4 genuinely
+  independent browser instances, real room/slot assignment, and 6 real
+  turns cycling through all 4 players (A→B→C→D→A→B) with full HP+terrain
+  convergence checked across all 4 clients after every turn. 3v3/4v4 use
+  the identical code path (same turn-queue/roster logic, parameterized by
+  team/slot count) and are considered low-risk by extension, but have not
+  themselves been individually run through a live 6- or 8-client test.
+
+Still open (out of scope for this pass, honestly disclosed, not hidden):
 - **Reconnection is not implemented** — if a client disconnects mid-match,
-  the room is not resumable; this was out of scope for this pass.
-- **No 2v2/3v3/4v4 network test yet** — all real two-client verification in
-  this pass used 1v1. The server code path for larger modes (turn queue
-  with >2 entries) is implemented but has NOT been independently verified
-  with real multi-client tests the way 1v1 has. This should be treated as
-  unverified, not as "should work by extension" — the exact bugs found in
-  this pass (bot-flagging, turn-advance broadcasting) were all things that
-  looked correct on paper before real multi-client testing exposed them.
+  the room is not resumable.
+- **3v3/4v4 have not been individually live-tested** with 6 or 8 real
+  browser instances (see above) — the code path is shared with the
+  verified 1v1/2v2 paths, but "shared code path" was exactly the kind of
+  assumption that turned out to hide real bugs earlier in this project
+  (e.g. bot-flagging worked "by extension" until real multi-client testing
+  exposed it), so this should be treated as reasonably-likely-to-work
+  rather than proven.
+
+## Hardening pass 2 (server-side charge validation, terrain sync, weapon fix)
+
+A second independent review pass (after the initial multiplayer
+implementation was merged) went looking specifically for the 3 gaps listed
+above, plus did full regression re-verification. Found and fixed:
+
+1. **Server-side SS charge validation.** Was a literal `// TODO` in the
+   original code — server trusted any client's `fire_shot` for `slot:'ss'`
+   without checking anything. Added `room.playerCharge` tracking
+   (initialized at match start, incremented +22/capped 100 on every
+   resolved shot via `handleShotResult`, reset to 0 when an SS is used),
+   and a real check in `handleFireShot` that rejects with
+   `shot_rejected: not_charged` if charge < 100. Verified two ways: (a) a
+   simulated malicious client calling `NetworkLayer.fireShot(..., 'ss', ...)`
+   directly (bypassing the legitimate client's own charge gate) was
+   correctly rejected, confirmed via a direct server-side charge-value log
+   showing `charge=0 required=100`; (b) 5 real alternating shots correctly
+   built charge to 100 and the resulting SS fire was accepted (no
+   rejection), then landed a real hit once properly aimed.
+
+2. **Terrain-diff sync**, described above and in the changelog at the top
+   of this file's "real bugs found" section pattern - this is the second
+   time this exact class of bug (assuming determinism holds without
+   verifying it) was found in this codebase, first for HP, now for
+   terrain. Fixed the same way: transmit the ground truth (carve
+   parameters, not a diff) and have receivers recompute from source
+   (regenerate + replay) rather than trying to patch potentially-drifted
+   local state.
+
+3. **A real, pre-existing gameplay bug found as a side effect of testing
+   the above**: Skyfin's Sky Strike (`skystrike` behavior) could
+   mathematically never hit a target at normal map spawn distance. The
+   projectile's horizontal velocity decayed at 0.92/tick, capping total
+   possible horizontal travel at ~186px even at 100% power — but typical
+   spawn separation is ~540px. Confirmed via direct projectile-position
+   tracing (showed the projectile going vertical at x≈480 while a
+   real target sat at x≈909) and an exhaustive angle/power trajectory
+   sweep that could not get within 380px of a target at ANY combination.
+   This was NOT caused by anything in today's changes — it was always
+   broken, just never caught because the original weapon-test harness only
+   checked "did it become vertical," not "can it actually land." Retuned
+   the decay rate to 0.985 (~990px max theoretical range - genuine reach
+   while still requiring real angle/power skill, not trivializing the
+   weapon). Verified: an exhaustive sweep now finds a shot with 1.9px
+   closest-approach distance (essentially exact), and firing that exact
+   angle/power lands a real confirmed hit (25 damage) reproducibly across
+   repeat tests with the same seed.
+
+4. **Two test-harness bugs found and fixed while re-verifying** (not game
+   bugs): `verify_weapons_final.js`'s split-detection logic checked
+   `projectile.weapon.behavior === 'split'`, but split-child projectiles
+   are deliberately pushed with `behavior: 'direct'` (see the split branch
+   in `handleTerrainHit`), so that condition could never be true at the
+   moment it mattered — fixed to detect split purely by projectile count.
+   Separately, `verify_milestone1.js` and `verify_sprites.js` were pointing
+   at a stale port (8795) left over from a worktree that no longer exists.
+
+Real 2v2 verification (new, not present in the original pass): 4 fully
+independent browser contexts, real room creation + 3 real joins, correct
+server-side slot assignment (t0p0/t0p1/t1p0/t1p1), all 4 clients confirmed
+to agree on the initial roster, then 6 real turns with proper round-robin
+rotation across all 4 players (not just alternating 2), full HP AND
+byte-for-byte terrain convergence checked across all 4 clients after every
+single turn, zero console errors on any client. Screenshot evidence at
+`/tmp/orbound_2v2_A.png` / `_B.png` shows 4 distinct real sprites, correct
+team-color rings, live charge-meter UI ("Twin Nova (22/100)"), and a real
+combat log with actual damage numbers.
 
 ## Verification artifacts
 

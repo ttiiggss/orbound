@@ -43,7 +43,7 @@ const EXE = '/home/rjl/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome'
   for (const [label, page] of [['B', pB], ['C', pC], ['D', pD]]) {
     await page.evaluate(() => window.NetworkLayer.connect('ws://localhost:8081'));
     await page.waitForTimeout(300);
-    const res = await page.evaluate((code, name) => window.NetworkLayer.joinRoom(code, name), roomCode, `Player${label}`);
+    const res = await page.evaluate(({ code, name }) => window.NetworkLayer.joinRoom(code, name), { code: roomCode, name: `Player${label}` });
     joinResults[label] = res;
     await page.waitForTimeout(200);
   }
