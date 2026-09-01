@@ -44,12 +44,18 @@ let currentWeaponSlot = 's1';
 // ============================================================
 // SETUP
 // ============================================================
-function newMatch(seed = Date.now() & 0xffffffff) {
+// Default roster used when newMatch() is called with no config (menu ->
+// Enter still gives the classic 1v1 practice match).
+const DEFAULT_ROSTER = {
+  teams: [
+    { mobiles: ['bastion'] },
+    { mobiles: ['driller'] },
+  ],
+};
+
+function newMatch(seed = Date.now() & 0xffffffff, roster = DEFAULT_ROSTER) {
   state.terrain = new C.Terrain(seed);
-  state.players = [
-    makePlayer('p1', 0, 'bastion', 0.14, 'You', false),
-    makePlayer('p2', 1, 'driller', 0.86, 'Bot', true),
-  ];
+  state.players = buildPlayersFromRoster(roster);
   layoutPlayersOnTerrain();
   state.tick = 0;
   state.wind = randRangeSigned(C.WIND_MAX * 0.5);
@@ -65,15 +71,53 @@ function newMatch(seed = Date.now() & 0xffffffff) {
   state.phase = 'aiming';
 }
 
+// Build a spread of players from a roster config: { teams: [{mobiles:[id,...]}, ...] }
+// Supports 2-4 teams with 1-4 players each (1v1 through 4v4). Teams are laid
+// out left-to-right across the map in evenly-spaced blocks so more teams
+// simply subdivide the available width instead of hardcoding two spawn zones.
+function buildPlayersFromRoster(roster) {
+  const teams = roster.teams;
+  const teamCount = teams.length;
+  const players = [];
+  // Reserve a margin on each edge so spawn points aren't flush against the map border.
+  const margin = 0.08;
+  const usableWidth = 1 - margin * 2;
+  const teamSlotWidth = usableWidth / teamCount;
+
+  teams.forEach((team, teamIdx) => {
+    const mobiles = team.mobiles;
+    const memberCount = mobiles.length;
+    // Within a team's slot, spread members evenly; single-member teams sit centered.
+    const teamStart = margin + teamIdx * teamSlotWidth;
+    mobiles.forEach((mobileId, memberIdx) => {
+      const memberFrac = memberCount === 1 ? 0.5 : (memberIdx + 0.5) / memberCount;
+      const xFrac = teamStart + memberFrac * teamSlotWidth;
+      const playerId = `t${teamIdx}p${memberIdx}`;
+      const name = team.names ? team.names[memberIdx] : (teamCount === 2 && teamIdx === 0 && memberIdx === 0 ? 'You' : `${teamLabel(teamIdx)} ${memberIdx + 1}`);
+      const isBot = team.isBot ? team.isBot[memberIdx] !== false : !(teamIdx === 0 && memberIdx === 0);
+      players.push(makePlayer(playerId, teamIdx, mobileId, xFrac, name, isBot));
+    });
+  });
+  return players;
+}
+
+function teamLabel(teamIdx) {
+  return ['Red', 'Blue', 'Green', 'Yellow'][teamIdx] || `Team${teamIdx + 1}`;
+}
+
 function makePlayer(id, teamIdx, mobileId, xFrac, name, isBot) {
   const mob = MOBILE_DEFS[mobileId];
+  // Face toward map center: left half of the map faces right, right half
+  // faces left. This generalizes correctly for any number of teams spread
+  // across the width, not just a hardcoded 2-team left/right split.
+  const facing = xFrac < 0.5 ? 1 : -1;
   return {
     id, teamIdx, mobileId, name, isBot,
     x: xFrac * C.CANVAS_W, y: 0,
     hp: mob.maxHp, maxHp: mob.maxHp,
-    angle: teamIdx === 0 ? 45 : 135, // degrees, 0 = right/flat, 90 = straight up
+    angle: facing === 1 ? 45 : 135, // degrees, 0 = right/flat, 90 = straight up
     power: 50,
-    facing: teamIdx === 0 ? 1 : -1,
+    facing,
     alive: true,
     stunTimer: 0,
   };
@@ -180,6 +224,7 @@ function fireShot(p, slot) {
   });
   state.phase = 'flying';
   state.charges[p.id] = 0; // firing resets charge (simplification for v1)
+  p.lastShotDelay = wep.delay; // used by resolveTurnEnd() to schedule the real return-to-queue delay
   logMsg(`${p.name} fired ${wep.name}!`);
 }
 
@@ -331,9 +376,8 @@ function resolveTurnEnd() {
   checkWinCondition();
   if (state.phase === 'gameover') return;
   const p = activePlayer();
-  const mob = MOBILE_DEFS[p.mobileId];
-  const wepUsed = mob.weapons[Object.keys(mob.weapons).find(k => true)]; // fallback
-  scheduleNextTurn(p.id, 20); // simplified fixed delay for v1; per-weapon delay applied at fire time below
+  const delay = p.lastShotDelay || 20; // real per-weapon delay cost; falls back to 20 if somehow unset
+  scheduleNextTurn(p.id, delay);
   advanceTurn();
   state.phase = 'aiming';
 }
@@ -377,7 +421,7 @@ function stepParticles() {
 }
 
 // ============================================================
-// BOT AI (simple: aim toward opponent with noise, fire when settled)
+// BOT AI (simple: aim toward nearest living enemy with noise, fire when settled)
 // ============================================================
 let botTimer = 0;
 function stepBotAI() {
@@ -386,8 +430,14 @@ function stepBotAI() {
   botTimer++;
   if (botTimer < 40) return;
   botTimer = 0;
-  const target = state.players.find(t => t.alive && t.id !== p.id);
-  if (!target) return;
+  // Target the nearest living player on a DIFFERENT team — critical in
+  // team modes (2v2/3v3/4v4) so bots never friendly-fire their own teammates.
+  const enemies = state.players.filter(t => t.alive && t.teamIdx !== p.teamIdx);
+  if (!enemies.length) return;
+  const target = enemies.reduce((closest, t) => {
+    const d = Math.abs(t.x - p.x);
+    return d < Math.abs(closest.x - p.x) ? t : closest;
+  }, enemies[0]);
   const dx = target.x - p.x;
   const angleGuess = C.clamp(45 - dx * 0.01 + randRangeSigned(8), 15, 80);
   p.angle = angleGuess;
@@ -720,11 +770,52 @@ function drawTrajectoryPreview() {
 // ============================================================
 function drawHUD() {
   drawTopBar();
+  drawTeamStatus();
   drawPowerMeter();
   drawWeaponSelector();
   drawLog();
   if (state.phase === 'gameover') drawGameOver();
   if (state.phase === 'menu') drawMenu();
+}
+
+function drawTeamStatus() {
+  if (!state.players.length) return;
+  const teamIndices = [...new Set(state.players.map(p => p.teamIdx))].sort();
+  if (teamIndices.length < 2) return;
+
+  const panelW = 150;
+  const rowH = 22;
+  const panelH = 14 + teamIndices.length * rowH;
+  const x = C.CANVAS_W - panelW - 20;
+  const y = C.CANVAS_H - panelH - 20;
+
+  ctx.save();
+  roundedRectPath(x, y, panelW, panelH, 10);
+  ctx.fillStyle = C.PALETTE.uiPanel;
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = C.PALETTE.outline;
+  ctx.stroke();
+
+  teamIndices.forEach((teamIdx, i) => {
+    const teamPlayers = state.players.filter(p => p.teamIdx === teamIdx);
+    const aliveCount = teamPlayers.filter(p => p.alive).length;
+    const team = C.TEAM_COLORS[teamIdx % C.TEAM_COLORS.length];
+    const rowY = y + 16 + i * rowH;
+
+    ctx.beginPath();
+    ctx.arc(x + 16, rowY, 6, 0, Math.PI * 2);
+    ctx.fillStyle = aliveCount > 0 ? team.fill : '#555';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = C.PALETTE.outline;
+    ctx.stroke();
+
+    ctx.fillStyle = aliveCount > 0 ? C.PALETTE.uiText : 'rgba(255,248,231,0.4)';
+    ctx.font = '13px Trebuchet MS';
+    ctx.fillText(`${teamLabel(teamIdx)}: ${aliveCount}/${teamPlayers.length}`, x + 30, rowY + 4);
+  });
+  ctx.restore();
 }
 
 function drawTopBar() {
@@ -875,7 +966,35 @@ function loop() {
 }
 
 // Expose for test/debug harness (playwright verification)
-window.ORBOUND_DEBUG = { state, newMatch, fireShot, MOBILES: MOBILE_DEFS, getPlayer };
+window.ORBOUND_DEBUG = { state, newMatch, fireShot, MOBILES: MOBILE_DEFS, getPlayer, buildPlayersFromRoster };
+
+// Convenience roster presets for 2v2/3v3/4v4 testing and future menu wiring.
+window.ORBOUND_ROSTERS = {
+  '1v1': {
+    teams: [
+      { mobiles: ['bastion'] },
+      { mobiles: ['driller'] },
+    ],
+  },
+  '2v2': {
+    teams: [
+      { mobiles: ['bastion', 'twinsplit'] },
+      { mobiles: ['driller', 'fortress'] },
+    ],
+  },
+  '3v3': {
+    teams: [
+      { mobiles: ['bastion', 'twinsplit', 'skyfin'] },
+      { mobiles: ['driller', 'fortress', 'voltaic'] },
+    ],
+  },
+  '4v4': {
+    teams: [
+      { mobiles: ['bastion', 'twinsplit', 'skyfin', 'ricochet'] },
+      { mobiles: ['driller', 'fortress', 'voltaic', 'bouncer'] },
+    ],
+  },
+};
 
 // Kick off sprite loading immediately; the game loop renders fine before
 // they're ready (falls back to vector art per-mobile until each image loads).
