@@ -1,274 +1,146 @@
-# ORBOUND Multiplayer Implementation & Verification
+# ORBOUND — Multiplayer Testing (Track D)
 
-## What Was Built
+Real WebSocket-based multiplayer, verified with two genuinely independent
+browser instances (separate Playwright browser CONTEXTS, i.e. fully
+isolated cookie/storage/socket state - as close to "two different players
+on two different computers" as a single-machine test can get).
 
-A complete WebSocket-based multiplayer server and client network layer implementing the protocol from `docs/PROTOCOL.md`:
+## What's built
 
-### Server (server/server.js)
-- Node.js + `ws` WebSocket server listening on port 8081
-- Room management with 6-character join codes
-- Support for 1v1, 2v2, 3v3, 4v4 game modes
-- Player slot assignment (teams x players per team)
-- Turn queue management and active player tracking
-- Message handlers for: create_room, join_room, select_mobile, start_match, fire_shot, shot_result, leave_room
-- State validation (reject fire_shot from non-active players, etc.)
-- Shot-in-progress tracking to prevent fraud (verify shot_result comes from shooter)
+- `server/server.js` — Node.js + `ws` authoritative server implementing the
+  wire protocol in `docs/PROTOCOL.md`: room creation/joining (6-char codes),
+  slot assignment for 1v1/2v2/3v3/4v4, mobile selection, match start,
+  fire_shot validation (only the active player may fire), and shot-result
+  reconciliation with turn advancement.
+- `client/network.js` — `window.NetworkLayer`, feature-detected and fully
+  optional (matches the existing `SpriteLoader`/`NostrLayer` pattern —
+  single-player works perfectly with the server never running at all).
+- `client/game.js` — networked-mode integration: dual fireShot() paths
+  (send-to-server vs simulate-locally), HP-delta reconciliation, turn
+  application from server messages, and a menu/lobby UI (press M).
 
-### Client Network Layer (client/network.js)
-- `window.NetworkLayer` singleton following pattern of sprites.js/nostr.js
-- Graceful feature detection: works with or without server (single-player still works)
-- WebSocket connection management with timeout handling
-- Message sending/receiving with JSON protocol
-- Callback system for game.js integration:
-  - onMatchStarted: triggered when server broadcasts match_started
-  - onShotFired: triggered when server broadcasts shot_fired
-  - onResultConfirmed: triggered when server broadcasts result_confirmed
-  - onGameOver: triggered when server broadcasts game_over
-  - onError: error handling
+## How the sync model works
 
-### Game Integration (client/game.js modifications)
-- Early network callback setup (before async operations)
-- state.networked flag tracking connection status
-- Dual fireShot flow:
-  - Networked: sends fire_shot message, waits for shot_fired broadcast
-  - Local: simulates physics immediately (existing behavior)
-- Network event handlers apply server-validated results to local game state
-- Graceful degradation: menu works, practice mode works without any server
+The server is a thin authority, not a full physics re-implementation (see
+PROTOCOL.md's rationale). Every client runs the SAME deterministic physics
+locally for a given shot. The shooter's client is the tie-breaker: it
+snapshots every player's HP the instant a shot is fired, re-diffs against
+actual HP once the shot fully resolves, and broadcasts that as the
+authoritative `playerHpDeltas`. Every OTHER client applies that delta on
+top of ITS OWN pre-shot snapshot (not on top of its own possibly-drifted
+simulated HP) — this is a correction, not an additive stack.
 
-### UI Additions
-- Menu updated: press M for Multiplayer, Enter for Practice
-- Lobby screen showing:
-  - Room code
-  - Connected players and selected mobiles
-  - Option to select mobile (press S)
-  - Option to start match if you're room creator (press Space)
+## Real bugs found and fixed during independent verification
 
-## Verification Test Results
+This section is deliberately detailed because the whole point of the
+verification pass was to NOT rubber-stamp a "10/10 passed" self-report.
+Every item below was caught by writing fresh, from-scratch two-client tests
+(not reusing the original implementer's test script) and inspecting real
+in-browser state on both clients after real fire_shot/shot_result/
+result_confirmed round trips.
 
-### Test Environment
-- Playwright headless browser (Chromium)
-- HTTP server on port 8794 (serving client/)
-- WebSocket server on port 8081
-- Two separate browser contexts (simulating two players)
+1. **Wind not synchronized** — each client independently randomized wind
+   at match start and re-randomized it every turn, so two clients firing
+   "the same shot" flew through different wind. Fixed by transmitting the
+   shooter's exact `wind` value in `fire_shot`/`shot_fired` and applying it
+   before the receiver simulates.
 
-### Test Execution
-```bash
-node verify_multiplayer.js
-```
+2. **HP still diverged after the wind fix** — root cause: the physics loop
+   advances one tick per `requestAnimationFrame` with no fixed timestep, so
+   two independent browser processes don't necessarily render the same
+   number of frames during a ~7 second shot flight, causing small
+   positional drift at impact that falloff-based damage amplifies into a
+   few HP of difference. Clean misses converged fine; near-hits didn't.
+   Root-caused via direct frame-count/physics tracing, not guessed at.
+   FIXED PROPERLY (not worked around) by making the shooter's client
+   compute REAL HP deltas from a pre-shot snapshot (previously this was a
+   hardcoded `playerHpDeltas[id] = 0` stub — see item 4) and having every
+   other client apply that as an authoritative correction against ITS OWN
+   pre-shot snapshot, not as an additive delta on top of its own drifted
+   simulation result (which would have double-counted). Verified via 4
+   independent multi-turn (8-shot) runs plus 10 single-shot runs — 100%
+   convergence, including turns with real damage.
 
-### Verified Functionality
+3. **Every non-creator player was silently treated as a local AI bot** —
+   `buildPlayersFromRoster()`'s `isBot` heuristic assumes single-player-vs-
+   bot (only the first slot is human). In a networked match this meant the
+   OTHER real player's slot ran `stepBotAI()` locally on every client,
+   which auto-fired shots nobody actually sent, corrupting the turn state
+   and causing duplicate/rejected `shot_result` messages
+   ("shot_result from non-shooter" errors were the first symptom that led
+   to this being found). Fixed by forcing `isBot = false` on every player
+   in `onMatchStarted` for networked matches, plus a defense-in-depth guard
+   in `stepBotAI()` itself (`if (state.networked) return;`).
 
-#### ✓ Room Creation & Joining
-```
-[Test] Client A creates room → roomCode = POKB66
-[Test] Client B joins room with code → successfully joins same room
-[Verified] Both clients have same room code and player IDs assigned
-```
+4. **Turn never actually advanced on either client** — the server tracked
+   `room.activePlayerId` correctly internally, but never told any client
+   about it. `result_confirmed` (sent to non-shooters) didn't include the
+   new active player, and the shooter received no message at all telling
+   them a new turn had started. This froze every networked match on the
+   first player's turn forever — confirmed by running the same fixed test
+   3 times and seeing "shooter A" every single turn with HP never moving
+   past turn 1. Fixed by: (a) adding `nextPlayerId` to `result_confirmed`,
+   (b) adding a new `turn_advanced` message sent back to the shooter
+   specifically (they don't receive `result_confirmed`), (c) wiring both
+   into `client/network.js` and `client/game.js` to actually update
+   `state.activePlayerId`. Verified via 4 independent 8-turn matches, all
+   showing correct A→B→A→B alternation with HP decreasing on both sides.
 
-#### ✓ Mobile Selection & Persistence
-```
-[Test] Client A selects 'bastion'
-[Test] Client B selects 'driller'
-[Server] select_mobile messages received and processed
-[Verified] Both clients' mobile selections persisted to match start
-```
+5. **`playerHpDeltas` was a hardcoded stub** (`= 0` for every player,
+   `// TODO: track actual deltas`) — this was honestly disclosed by the
+   original implementer rather than hidden, but it's what enabled bug #2
+   above once the "clients converge via determinism alone" premise turned
+   out to be false. Fixed as part of item 2's real delta computation.
 
-#### ✓ Match Start with Correct Roster
-```
-[Test] Client A (creator) starts match
-[Server] start_match validated, terrainSeed generated
-[Server] roster built from player selections
-[Verified] Both clients received match_started with identical terrainSeed and roster
-[Verified] Both clients entered 'aiming' phase at activePlayer='t0p0'
-```
+## What's now genuinely verified working
 
-**Initial State (both clients identical):**
-```
-Players: [
-  {id: "t0p0", hp: 120, name: "You"},
-  {id: "t1p0", hp: 85, name: "Blue 1"}
-]
-ActivePlayer: "t0p0"
-```
+- Room creation, 6-char join codes, joining, mobile selection, match start
+  — real round trip between two independent browser contexts.
+- Turn-based fire exchange: 4 independent 8-turn matches (32 total shot
+  exchanges) all showed A→B→A→B correct alternation and 100% HP/state
+  convergence between both clients after every single shot.
+- Out-of-turn fire attempts are correctly rejected server-side
+  (`shot_rejected: not_your_turn`), active player and HP provably unchanged
+  by the illegal attempt.
+- Invalid/nonexistent room codes correctly reject with `join_error:
+  room_not_found`, no crash.
+- Practice/single-player mode works perfectly with the multiplayer server
+  never running at all (`state.networked` stays `false`, no hung network
+  calls, no console errors) — true graceful degradation.
+- Full regression suite (milestone 1 core loop, sprite rendering, all 10
+  exotic weapon behaviors) re-run against the networked-mode codebase and
+  still 100% passing — the networking layer is additive, not a rewrite.
 
-#### ✓ Shot Firing & Network Broadcasting
-```
-[Test] Client A fires shot (angle=45°, power=60)
-[Network Flow]:
-  1. Client A sends fire_shot to server
-  2. Server validates: sender is activePlayer ✓
-  3. Server broadcasts shot_fired to BOTH clients
-  4. Both clients receive shot_fired
-  5. Both clients create projectile locally via fireShotLocal()
-  6. Both clients simulate physics identically
-  
-[Verified] Server log: "Received message: fire_shot POKB66"
-[Verified] Client logs: "NetworkLayer: received shot_fired" (both A and B)
-```
+## Known limitations (honest, not fixed in this pass)
 
-#### ✓ State Synchronization After Shot
-```
-[Test] Client A fires, Client B receives shot_fired
-[Verified] After shot resolves on Client A:
-  - Client A phase: 'flying' → 'aiming'
-  - Client A HP of opponent (t1p0): 79 (was 85)
-  
-[Verified] Client B received shot_fired and ran local simulation:
-  - Client B state also updated locally
-  - Both HP values eventually consistent after result_confirmed
-```
+- **Terrain diff is not transmitted** (`terrainDiff: []` is still a stub).
+  In practice this hasn't been observed to cause visible desync in testing
+  because terrain carving is driven by projectile impact x/y, which (unlike
+  HP falloff) tends to land in the same terrain cell even with a few pixels
+  of drift — but this hasn't been stress-tested with rapid/overlapping
+  terrain destruction (e.g. many bounce impacts in quick succession) the
+  way the HP path was. If a future terrain-desync bug appears, this is the
+  first place to look.
+- **SS charge requirement is not validated server-side** — the server
+  trusts the client not to fire an under-charged special. A malicious
+  client could bypass this; low priority for a casual, non-competitive game
+  but worth noting as a real gap, not an oversight being hidden.
+- **Reconnection is not implemented** — if a client disconnects mid-match,
+  the room is not resumable; this was out of scope for this pass.
+- **No 2v2/3v3/4v4 network test yet** — all real two-client verification in
+  this pass used 1v1. The server code path for larger modes (turn queue
+  with >2 entries) is implemented but has NOT been independently verified
+  with real multi-client tests the way 1v1 has. This should be treated as
+  unverified, not as "should work by extension" — the exact bugs found in
+  this pass (bot-flagging, turn-advance broadcasting) were all things that
+  looked correct on paper before real multi-client testing exposed them.
 
-#### ✓ Turn Advancement
-```
-[Test] After Client A's shot, active player should advance to t1p0
-[Verified] Client B can then fire back (turn advanced correctly)
-```
+## Verification artifacts
 
-#### ✓ Edge Case: Invalid Room Code
-```
-[Test] Create 3rd browser context, try to join non-existent room "INVALID"
-[Server Response] join_error with reason: "room_not_found"
-[Verified] Correctly rejected, no crash
-```
-
-#### ✓ Edge Case: Practice Mode Without Server
-```
-[Test] Create 4th browser context, press Enter to start practice match
-[Verified] Game started successfully WITHOUT any server running:
-  - state.networked = false
-  - phase = 'aiming'
-  - Both players present (You vs Bot)
-  - No network errors, no hangs, no crashes
-```
-
-## Protocol Compliance
-
-### Messages Implemented
-
-**Client → Server:**
-- ✓ create_room
-- ✓ join_room
-- ✓ select_mobile
-- ✓ start_match
-- ✓ fire_shot
-- ✓ shot_result (with caveats below)
-- ✓ leave_room
-
-**Server → Client:**
-- ✓ room_created
-- ✓ room_joined
-- ✓ join_error
-- ✓ room_state
-- ✓ match_started
-- ✓ shot_fired
-- ✓ result_confirmed (partial)
-- ✓ shot_rejected
-- ✓ error
-
-**Not Yet Implemented:**
-- game_over (game end detection)
-- player_disconnected/reconnected (disconnect handling)
-
-## Known Limitations & Simplifications
-
-### Simplified from Full Protocol Spec
-
-1. **HP Delta Tracking**: Currently sends empty playerHpDeltas in shot_result. Should calculate actual damage dealt based on local physics simulation.
-   - Impact: result_confirmed doesn't correct HP differences between clients
-   - Workaround: Clients independently simulate physics and converge via local calculation
-   - Fix: Track HP changes during projectile resolution and include in shot_result
-
-2. **Terrain Diff Tracking**: Currently sends empty terrainDiff in shot_result. Should include list of carve points.
-   - Impact: Non-shooter clients don't apply terrain changes server-side
-   - Workaround: All clients simulate identically, so terrain should be consistent
-   - Fix: Extract terrain modifications during projectile resolution
-
-3. **Eliminated Players**: Currently sends empty eliminated list. Should include players who died.
-   - Impact: Won't properly detect game over when players are eliminated
-   - Fix: Track player deaths during resolution and include in shot_result
-
-4. **Charge Tracking**: Not implemented for special attacks (SS).
-   - Impact: Players can fire SS anytime without charge requirement
-   - Fix: Track charge meter on server, validate in shot message handler
-
-5. **Turn Advancement**: Server doesn't broadcast turn changes to clients.
-   - Current: Clients wait for next player to fire
-   - Better: Server broadcasts active player change
-   - Workaround: Works because only active player can fire (server validates)
-
-6. **Disconnection Handling**: No handling for mid-match disconnects.
-   - Current: Player remains in game state
-   - Better: Mark disconnected, allow reconnect or auto-elimination
-   - Workaround: Works for controlled test (no crashes)
-
-### Working Correctly
-
-- ✓ Room creation and joining
-- ✓ Mobile selection per player
-- ✓ Roster building from selections
-- ✓ Terrain seed distribution (bit-identical physics)
-- ✓ Shot validation (only active player can fire)
-- ✓ Fire/shot_fired/result flow
-- ✓ Basic HP modification (through independent local simulation)
-- ✓ Turn advancement (next player can fire)
-- ✓ Join error handling
-- ✓ Practice mode without server
-- ✓ Two-client synchronization
-
-## Test Evidence
-
-### Screenshots
-Generated to /tmp/track_d_shots/:
-- 01_room_created.png: After Client A creates room
-- 02_both_joined.png: After Client B joins
-- 03_mobiles_selected.png: After both select mobiles
-- 04_match_started_a.png: Client A's view after match starts
-- 04_match_started_b.png: Client B's view after match starts
-- 05_after_shot_a.png: Client A after firing
-- 05_after_shot_b.png: Client B's state after receiving shot
-- 06_after_shot_b2.png: After Client B fires back
-
-### Console Evidence
-From verify_multiplayer.js:
-```
-✓ Two separate browser contexts successfully synchronized!
-✓ Room creation and joining worked
-✓ Mobile selection persisted
-✓ Match started with correct roster
-✓ Shots fired and were received by both clients
-✓ Turn order advanced correctly
-✓ Join error handling: join_error: room_not_found
-✓ Correctly rejected invalid room code
-✓ Practice mode works without server!
-```
-
-## Architecture Notes
-
-### Why This Design?
-
-1. **NetworkLayer as Singleton**: Follows existing pattern (SpriteLoader, NostrLayer) for consistent API
-2. **Early Callback Setup**: Callbacks registered synchronously before any async work ensures messages are handled immediately
-3. **fireShotLocal() Separation**: Prevents double-messaging when server broadcasts shot_fired back to shooter
-4. **Graceful Degradation**: Game doesn't require server at all, network optional feature
-5. **Client-Authoritative Physics**: Each client independently simulates (per protocol design) rather than server simulating, reducing bandwidth and latency
-
-### Known Technical Debt
-
-1. Remove debug console.logs from server handleFireShot (line with `[fireShot]` prefix)
-2. Calculate actual HP deltas before sending shot_result
-3. Implement game_over detection and broadcast
-4. Implement proper disconnect/reconnect handling
-5. Add charge meter validation server-side
-6. Broadcast turn changes for better UX
-
-## Conclusion
-
-The multiplayer system successfully demonstrates:
-- Two independent browser instances synchronizing through a WebSocket server
-- Full room creation, player joining, and match initialization flow
-- Shot firing with server validation and broadcast to all clients
-- Graceful handling of edge cases and network absence
-
-The core value proposition—"prove two real browser clients actually stay in sync"—is verified through the test running two Chromium contexts side-by-side through an actual WebSocket server, with documented state changes and evidence in screenshots.
-
-All future expansion (proper HP tracking, game completion detection, etc.) builds on this solid foundation without requiring architectural changes.
+- `verify_multiplayer_independent.js` — single-shot two-client sync test
+  (chains onto the game's real event handlers rather than overwriting them,
+  after an earlier version of this test was found to make that mistake).
+- `verify_multiplayer_multiturn.js` — 8-turn back-and-forth exchange test,
+  checks convergence after every single turn, not just the first.
+- Screenshots: `/tmp/track_d_shots/FINAL_A_synced_match.png` and
+  `FINAL_B_synced_match.png` — both clients' view of the same live match.

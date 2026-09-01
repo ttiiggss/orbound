@@ -33,6 +33,7 @@ const NetworkLayer = {
   onMatchStarted: null,
   onShotFired: null,
   onResultConfirmed: null,
+  onTurnAdvanced: null,
   onPlayerDisconnected: null,
   onGameOver: null,
   onError: null,
@@ -197,13 +198,17 @@ const NetworkLayer = {
   // ============================================================
   // SHOT FIRING & RESULTS
   // ============================================================
-  fireShot(angle, power, slot) {
+  fireShot(angle, power, slot, wind) {
     this.shotInProgress = true;
     this.send({
       type: 'fire_shot',
       angle,
       power,
       slot,
+      wind, // shooter's exact wind value at fire time - receivers apply this
+            // before simulating so trajectories/damage stay in sync (wind
+            // otherwise drifts independently and non-deterministically on
+            // each client, which was found to cause real HP desync in testing)
     });
   },
 
@@ -250,7 +255,16 @@ const NetworkLayer = {
 
       case 'result_confirmed':
         this.lastShotResult = msg;
+        if (msg.nextPlayerId) this.activePlayerId = msg.nextPlayerId;
         if (this.onResultConfirmed) this.onResultConfirmed(msg);
+        break;
+
+      case 'turn_advanced':
+        // Sent back to the shooter specifically (they don't get
+        // result_confirmed, which only goes to other clients) so they also
+        // learn whose turn is next.
+        this.activePlayerId = msg.nextPlayerId;
+        if (this.onTurnAdvanced) this.onTurnAdvanced(msg);
         break;
 
       case 'player_disconnected':

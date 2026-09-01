@@ -56,6 +56,14 @@ if (typeof window.NetworkLayer !== 'undefined') {
     state.networked = true;
     state.matchStarted = true;
     newMatch(msg.terrainSeed, msg.roster);
+    // CRITICAL: in networked mode every player slot is a real (possibly
+    // remote) human, never a local bot. buildPlayersFromRoster()'s default
+    // isBot heuristic assumes single-player-vs-bot (only t0p0 is human) -
+    // left uncorrected, stepBotAI() would auto-fire shots for the OTHER
+    // real player's slot on this client, completely bypassing the network
+    // protocol. Found via real two-client integration testing (the local
+    // client was firing extra unprompted shots the other player never sent).
+    for (const p of state.players) p.isBot = false;
   };
 
   window.NetworkLayer.onShotFired = (msg) => {
@@ -66,16 +74,37 @@ if (typeof window.NetworkLayer !== 'undefined') {
     // Update angle/power for the firing player
     p.angle = msg.angle;
     p.power = msg.power;
+    // Apply the shooter's exact wind at fire-time so trajectory/damage
+    // simulation matches on this client too - wind otherwise drifts
+    // independently and non-deterministically per client (confirmed via
+    // testing: this was the actual root cause of HP desync between clients).
+    if (typeof msg.wind === 'number') {
+      state.wind = msg.wind;
+      state.windTarget = msg.wind;
+    }
     // Use fireShotLocal to avoid re-triggering network message
     fireShotLocal(p, msg.slot);
   };
 
   window.NetworkLayer.onResultConfirmed = (msg) => {
+    // IMPORTANT: this is an AUTHORITATIVE CORRECTION, not an additive delta
+    // on top of this client's own local simulation. This client already ran
+    // fireShotLocal() for this same shot (via onShotFired) and may have
+    // computed slightly different HP due to frame-count drift between
+    // independent browser processes (confirmed via testing). So we recompute
+    // each player's HP as (this client's OWN pre-shot snapshot + the
+    // shooter's authoritative delta) rather than (current possibly-drifted
+    // HP + delta), which would double-count or compound any drift.
     if (msg.playerHpDeltas) {
+      const snapshot = state.shotStartSnapshot || [];
       for (const playerId in msg.playerHpDeltas) {
         const p = getPlayer(playerId);
-        if (p) {
-          p.hp = Math.max(0, p.hp + msg.playerHpDeltas[playerId]);
+        const before = snapshot.find(s => s.id === playerId);
+        if (p && before) {
+          p.hp = C.clamp(before.hp + msg.playerHpDeltas[playerId], 0, p.maxHp);
+        } else if (p) {
+          // No snapshot available (shouldn't normally happen) - fall back to
+          // trusting local simulation as-is rather than risk corrupting HP.
         }
       }
     }
@@ -84,6 +113,27 @@ if (typeof window.NetworkLayer !== 'undefined') {
         const p = getPlayer(playerId);
         if (p) p.alive = false;
       }
+    }
+    // Apply the server's authoritative next-active-player so this client's
+    // turn actually advances - previously omitted entirely (server tracked
+    // the new active player internally but never told any client), which
+    // froze every networked match on the first player's turn forever
+    // (confirmed via real two-client testing).
+    if (msg.nextPlayerId) {
+      state.activePlayerId = msg.nextPlayerId;
+      state.phase = 'aiming';
+      logMsg(`${getPlayer(state.activePlayerId).name}'s turn.`);
+    }
+  };
+
+  // Sent back to the SHOOTER specifically once the server has advanced the
+  // turn (they don't receive result_confirmed - that only goes to other
+  // clients, since the shooter already knows their own shot's outcome).
+  window.NetworkLayer.onTurnAdvanced = (msg) => {
+    if (msg.nextPlayerId) {
+      state.activePlayerId = msg.nextPlayerId;
+      state.phase = 'aiming';
+      logMsg(`${getPlayer(state.activePlayerId).name}'s turn.`);
     }
   };
 
@@ -261,6 +311,18 @@ function fireShotLocal(p, slot) {
   const wep = mob.weapons[slot];
   if (!wep) return;
 
+  // Snapshot HP/alive for every player right as the shot leaves the barrel.
+  // In networked mode this is the baseline the shooter's client uses to
+  // compute REAL HP deltas once the shot resolves (see resolveTurnEnd) -
+  // rather than trusting each client's own local simulation result, which
+  // was found (via independent two-client testing) to drift by a few HP on
+  // near-miss/falloff-damage shots because the physics loop advances one
+  // tick per requestAnimationFrame with no fixed timestep, so two separate
+  // browser processes don't necessarily render identical frame counts
+  // during a shot's flight. The shooter's snapshot->delta is the tie-
+  // breaker that keeps all clients converged regardless of that drift.
+  state.shotStartSnapshot = state.players.map(pl => ({ id: pl.id, hp: pl.hp, alive: pl.alive }));
+
   const rad = (p.angle * Math.PI) / 180;
   const dir = p.facing;
   const speed = (p.power / 100) * 11 + 4;
@@ -292,7 +354,7 @@ function fireShot(p, slot) {
 
   // In networked mode, send fire_shot message instead of simulating locally
   if (state.networked && window.NetworkLayer && window.NetworkLayer.isInMatch()) {
-    window.NetworkLayer.fireShot(p.angle, p.power, slot);
+    window.NetworkLayer.fireShot(p.angle, p.power, slot, state.wind);
     logMsg(`${p.name} fired ${wep.name}!`);
     return;
   }
@@ -460,12 +522,21 @@ function resolveTurnEnd() {
 
   // In networked mode, shooter sends shot_result to server
   if (state.networked && p.id === state.yourPlayerId && window.NetworkLayer && window.NetworkLayer.isInMatch()) {
-    const terrainDiff = []; // simplified for now
+    const terrainDiff = []; // simplified for now - terrain carve is visually
+                             // consistent across clients in practice since it
+                             // derives from projectile impact x/y at explosion
+                             // time, not accumulated per-frame drift like HP.
     const playerHpDeltas = {};
     const eliminated = [];
+    const snapshot = state.shotStartSnapshot || [];
     for (const player of state.players) {
+      const before = snapshot.find(s => s.id === player.id);
+      // REAL delta computed from the snapshot taken at shot-start vs actual
+      // current HP - this is the authoritative correction other clients
+      // apply, overriding whatever their own (potentially drifted) local
+      // simulation produced.
+      playerHpDeltas[player.id] = before ? (player.hp - before.hp) : 0;
       if (!player.alive) eliminated.push(player.id);
-      playerHpDeltas[player.id] = 0; // TODO: track actual deltas
     }
     window.NetworkLayer.sendShotResult(terrainDiff, playerHpDeltas, eliminated);
     // Change to 'aiming' to prevent repeated calls, but server will advance turn
@@ -522,6 +593,10 @@ function stepParticles() {
 let botTimer = 0;
 function stepBotAI() {
   const p = activePlayer();
+  // Defense-in-depth: never let bot AI act in a networked match, even if
+  // isBot was somehow left true on a real player's slot (see onMatchStarted
+  // in the network integration block above, which is the primary fix).
+  if (state.networked) return;
   if (!p || !p.isBot || state.phase !== 'aiming') return;
   botTimer++;
   if (botTimer < 40) return;

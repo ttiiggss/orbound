@@ -290,7 +290,7 @@ function handleStartMatch(ws, msg, clientRoomInfo) {
 
 function handleFireShot(ws, msg, clientRoomInfo) {
   try {
-    const { angle, power, slot } = msg;
+    const { angle, power, slot, wind } = msg;
     if (!clientRoomInfo || angle === undefined || power === undefined || !slot) {
       ws.send(JSON.stringify({ type: 'error', message: 'Invalid fire_shot message' }));
       return;
@@ -319,7 +319,7 @@ function handleFireShot(ws, msg, clientRoomInfo) {
     // TODO: Check charge requirement for SS
 
     // Broadcast shot fired to all clients
-    room.shotInProgress = { playerId, angle, power, slot, shooterWs: ws };
+    room.shotInProgress = { playerId, angle, power, slot, wind, shooterWs: ws };
     for (const player of Object.values(room.players)) {
       if (!player.ws || !player.connected) continue;
       player.ws.send(JSON.stringify({
@@ -328,6 +328,7 @@ function handleFireShot(ws, msg, clientRoomInfo) {
         angle,
         power,
         slot,
+        wind,
         isYourShot: player.ws === ws,
       }));
     }
@@ -362,38 +363,23 @@ function handleShotResult(ws, msg, clientRoomInfo) {
       room.playerHp[playerId] = Math.max(0, (room.playerHp[playerId] || 100) + playerHpDeltas[playerId]);
     }
 
-    // Broadcast result to all other clients
-    const otherClients = Object.values(room.players).filter(p => p.ws !== ws);
-    const resultMsg = {
-      type: 'result_confirmed',
-      terrainDiff,
-      playerHpDeltas,
-      eliminated: eliminated || [],
-    };
-    for (const player of otherClients) {
-      if (player.ws && player.connected) {
-        player.ws.send(JSON.stringify(resultMsg));
-      }
-    }
-
-    // Check win condition
+    // Check win condition BEFORE broadcasting, so the same result_confirmed
+    // message can tell every OTHER client whose turn is next (or that the
+    // match ended) - this was previously omitted entirely, which meant no
+    // client ever learned the turn had advanced (confirmed via real
+    // two-client testing: activePlayerId never changed on either client
+    // after a shot, freezing the match on the first player's turn forever).
     const playersAlive = Object.keys(room.players).filter(
       pid => !(eliminated && eliminated.includes(pid))
     );
     const teamsAlive = new Set(
       playersAlive.map(pid => room.players[pid].teamIdx)
     );
+    const isGameOver = teamsAlive.size <= 1;
+    let nextPlayerId = null;
 
-    if (teamsAlive.size <= 1) {
-      room.status = 'finished';
-      const winningTeam = teamsAlive.size === 1 ? [...teamsAlive][0] : null;
-      broadcastToRoom(room, {
-        type: 'game_over',
-        winningTeam,
-      });
-    } else {
+    if (!isGameOver) {
       // Advance turn: schedule next player
-      const currentPlayer = room.players[clientRoomInfo.playerId];
       const weaponDelays = { s1: 18, s2: 30, ss: 55 }; // default delays
       const delay = weaponDelays[room.shotInProgress.slot] || 20;
       room.currentTick = Math.max(room.currentTick, room.activePlayerId ? 0 : 0) + delay;
@@ -416,7 +402,39 @@ function handleShotResult(ws, msg, clientRoomInfo) {
         // Sort and find next active player
         room.turnQueue.sort((a, b) => a.readyTick - b.readyTick);
         room.activePlayerId = room.turnQueue[0].playerId;
+        nextPlayerId = room.activePlayerId;
       }
+    }
+
+    // Broadcast result (including the new active player) to all OTHER clients
+    const otherClients = Object.values(room.players).filter(p => p.ws !== ws);
+    const resultMsg = {
+      type: 'result_confirmed',
+      terrainDiff,
+      playerHpDeltas,
+      eliminated: eliminated || [],
+      nextPlayerId,
+    };
+    for (const player of otherClients) {
+      if (player.ws && player.connected) {
+        player.ws.send(JSON.stringify(resultMsg));
+      }
+    }
+    // The shooter ALSO needs to learn whose turn is next - they don't
+    // receive result_confirmed (only other clients do, since they already
+    // know their own shot's outcome), so send a lightweight turn_advanced
+    // message back to them specifically.
+    if (!isGameOver && nextPlayerId) {
+      ws.send(JSON.stringify({ type: 'turn_advanced', nextPlayerId }));
+    }
+
+    if (isGameOver) {
+      room.status = 'finished';
+      const winningTeam = teamsAlive.size === 1 ? [...teamsAlive][0] : null;
+      broadcastToRoom(room, {
+        type: 'game_over',
+        winningTeam,
+      });
     }
 
     room.shotInProgress = null;
