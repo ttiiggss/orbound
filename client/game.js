@@ -31,6 +31,7 @@ const state = {
   charges: {},
   log: [],
   winner: null,
+  victoryAudioPlayed: false,
   // Network state
   networked: false,
   yourPlayerId: null,
@@ -174,6 +175,7 @@ function newMatch(seed = Date.now() & 0xffffffff, roster = DEFAULT_ROSTER) {
   state.particles = [];
   state.log = [];
   state.winner = null;
+  state.victoryAudioPlayed = false;
   advanceTurn();
   state.phase = 'aiming';
 }
@@ -341,6 +343,8 @@ function fireShotLocal(p, slot) {
   state.phase = 'flying';
   state.charges[p.id] = 0;
   p.lastShotDelay = wep.delay;
+  // Play fire shot sound
+  if (typeof window.AudioFX !== 'undefined') window.AudioFX.playFireShot();
 }
 
 function fireShot(p, slot) {
@@ -426,6 +430,7 @@ function handleTerrainHit(proj) {
   }
   if (behavior === 'bounce' && proj.bounces < proj.maxBounces) {
     // Bounce: deal partial "impact" damage at each bounce point, then continue
+    if (typeof window.AudioFX !== 'undefined') window.AudioFX.playImpact();
     dealAreaDamage(proj.x, proj.y, proj.weapon.radius * 0.55, proj.weapon.power * 0.35, proj);
     state.terrain.carve(proj.x, proj.y, proj.weapon.radius * 0.4);
     spawnParticles(proj.x, proj.y, 8, '#5ee08a');
@@ -437,6 +442,7 @@ function handleTerrainHit(proj) {
   }
   if (behavior === 'wallbounce' && proj.bounces < proj.maxBounces) {
     // Wall bounce: bounces off terrain like bounce, but with tighter bounce
+    if (typeof window.AudioFX !== 'undefined') window.AudioFX.playImpact();
     dealAreaDamage(proj.x, proj.y, proj.weapon.radius * 0.5, proj.weapon.power * 0.4, proj);
     state.terrain.carve(proj.x, proj.y, proj.weapon.radius * 0.35);
     spawnParticles(proj.x, proj.y, 6, '#e0d4ff');
@@ -463,6 +469,7 @@ function handleTerrainHit(proj) {
 }
 
 function explodeProjectile(proj, removeSelf = true) {
+  if (typeof window.AudioFX !== 'undefined') window.AudioFX.playImpact();
   dealAreaDamage(proj.x, proj.y, proj.weapon.radius, proj.weapon.power, proj);
   state.terrain.carve(proj.x, proj.y, proj.weapon.radius);
   spawnExplosion(proj.x, proj.y, proj.weapon.radius);
@@ -484,7 +491,10 @@ function dealAreaDamage(x, y, radius, basePower, proj) {
     dmg = Math.round(dmg);
     target.hp = C.clamp(target.hp - dmg, 0, target.maxHp);
     state.shakeAmount = Math.min(22, state.shakeAmount + dmg * 0.4);
-    if (dmg > 0) logMsg(`${target.name} took ${dmg} damage!`);
+    if (dmg > 0) {
+      logMsg(`${target.name} took ${dmg} damage!`);
+      if (typeof window.AudioFX !== 'undefined') window.AudioFX.playDamage();
+    }
     if (target.hp <= 0) {
       target.alive = false;
       logMsg(`${target.name} was eliminated!`);
@@ -1088,6 +1098,12 @@ function drawLog() {
 }
 
 function drawGameOver() {
+  // Play victory sound once on first render
+  if (!state.victoryAudioPlayed && typeof window.AudioFX !== 'undefined') {
+    window.AudioFX.playVictory();
+    state.victoryAudioPlayed = true;
+  }
+
   ctx.save();
   ctx.fillStyle = 'rgba(20,10,30,0.7)';
   ctx.fillRect(0, 0, C.CANVAS_W, C.CANVAS_H);
@@ -1104,57 +1120,213 @@ function drawGameOver() {
 
 function drawMenu() {
   ctx.save();
-  ctx.fillStyle = 'rgba(20,10,30,0.55)';
+  // Sky gradient background
+  const grad = ctx.createLinearGradient(0, 0, 0, C.CANVAS_H);
+  grad.addColorStop(0, C.PALETTE.skyTop);
+  grad.addColorStop(1, C.PALETTE.skyBottom);
+  ctx.fillStyle = grad;
   ctx.fillRect(0, 0, C.CANVAS_W, C.CANVAS_H);
-  ctx.fillStyle = C.PALETTE.uiText;
-  ctx.font = 'bold 56px Trebuchet MS';
+
+  // Sun glow
+  const g2 = ctx.createRadialGradient(1080, 120, 10, 1080, 120, 220);
+  g2.addColorStop(0, C.PALETTE.sunGlow);
+  g2.addColorStop(1, 'rgba(255,244,190,0)');
+  ctx.fillStyle = g2;
+  ctx.fillRect(860, -100, 440, 440);
+
+  // Clouds (animated)
+  const cloudOffset = ((state.tick || 0) * 0.3) % 1280;
+  drawCloud(180 + cloudOffset, 100, 1.1);
+  drawCloud(560 + cloudOffset, 70, 0.8);
+  drawCloud(900 + cloudOffset, 150, 0.9);
+
+  // Semi-transparent overlay panel for title area
+  ctx.fillStyle = 'rgba(20,10,30,0.4)';
+  ctx.fillRect(0, C.CANVAS_H / 2 - 180, C.CANVAS_W, 360);
+
   ctx.textAlign = 'center';
-  ctx.fillText('ORBOUND', C.CANVAS_W / 2, C.CANVAS_H / 2 - 20);
-  ctx.font = '20px Trebuchet MS';
-  ctx.fillText('Press ENTER for Practice vs Bot', C.CANVAS_W / 2, C.CANVAS_H / 2 + 30);
-  ctx.fillText('Press M for Multiplayer', C.CANVAS_W / 2, C.CANVAS_H / 2 + 60);
+  ctx.textBaseline = 'middle';
+
+  // Main title with bold outline style
+  const titleY = C.CANVAS_H / 2 - 80;
+  ctx.font = 'bold 92px Trebuchet MS';
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = C.PALETTE.outline;
+  ctx.strokeText('ORBOUND', C.CANVAS_W / 2, titleY);
+  ctx.fillStyle = C.PALETTE.uiAccent;
+  ctx.fillText('ORBOUND', C.CANVAS_W / 2, titleY);
+
+  // Subtitle
+  ctx.font = '24px Trebuchet MS';
+  ctx.fillStyle = 'rgba(255,248,231,0.8)';
+  ctx.fillText('Turn-Based Artillery Combat', C.CANVAS_W / 2, titleY + 50);
+
+  // Menu options panel
+  const panelX = C.CANVAS_W / 2 - 180;
+  const panelY = C.CANVAS_H / 2 + 40;
+  const panelW = 360;
+  const panelH = 140;
+
+  roundedRectPath(panelX, panelY, panelW, panelH, 16);
+  ctx.fillStyle = 'rgba(44,31,74,0.95)';
+  ctx.fill();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = C.PALETTE.outline;
+  ctx.stroke();
+
+  // Menu options
+  ctx.font = 'bold 20px Trebuchet MS';
+  ctx.fillStyle = C.PALETTE.uiText;
+  ctx.textAlign = 'left';
+  ctx.fillText('ENTER', panelX + 20, panelY + 35);
+  ctx.font = '16px Trebuchet MS';
+  ctx.fillStyle = 'rgba(255,248,231,0.7)';
+  ctx.fillText('Practice vs Bot', panelX + 90, panelY + 35);
+
+  ctx.font = 'bold 20px Trebuchet MS';
+  ctx.fillStyle = C.PALETTE.uiText;
+  ctx.fillText('M', panelX + 20, panelY + 75);
+  ctx.font = '16px Trebuchet MS';
+  ctx.fillStyle = 'rgba(255,248,231,0.7)';
+  ctx.fillText('Multiplayer', panelX + 90, panelY + 75);
+
+  ctx.font = 'bold 20px Trebuchet MS';
+  ctx.fillStyle = C.PALETTE.uiText;
+  ctx.fillText('?', panelX + 20, panelY + 115);
+  ctx.font = '16px Trebuchet MS';
+  ctx.fillStyle = 'rgba(255,248,231,0.7)';
+  ctx.fillText('How to Play', panelX + 90, panelY + 115);
+
   ctx.textAlign = 'left';
   ctx.restore();
 }
 
 function drawLobby() {
   ctx.save();
-  ctx.fillStyle = 'rgba(20,10,30,0.75)';
+  // Sky gradient background
+  const grad = ctx.createLinearGradient(0, 0, 0, C.CANVAS_H);
+  grad.addColorStop(0, C.PALETTE.skyTop);
+  grad.addColorStop(1, C.PALETTE.skyBottom);
+  ctx.fillStyle = grad;
   ctx.fillRect(0, 0, C.CANVAS_W, C.CANVAS_H);
+
   ctx.fillStyle = C.PALETTE.uiText;
   ctx.font = 'bold 40px Trebuchet MS';
   ctx.textAlign = 'center';
-  ctx.fillText('Room: ' + window.NetworkLayer.roomCode, C.CANVAS_W / 2, 80);
-  ctx.font = '18px Trebuchet MS';
-  ctx.fillText('Players:', C.CANVAS_W / 2, 130);
+  ctx.fillText('Lobby: ' + (window.NetworkLayer.roomCode || '?'), C.CANVAS_W / 2, 60);
 
-  let y = 160;
-  for (const player of window.NetworkLayer.players) {
-    const mobile = player.mobileId || '(no mobile)';
-    ctx.fillText(`${player.name}: ${mobile}`, C.CANVAS_W / 2 - 150, y);
-    y += 30;
+  // Panel for players
+  const panelX = C.CANVAS_W / 2 - 220;
+  const panelY = 110;
+  const panelW = 440;
+  const playerCount = window.NetworkLayer.players ? window.NetworkLayer.players.length : 0;
+  const panelH = Math.max(120, 50 + playerCount * 35);
+
+  roundedRectPath(panelX, panelY, panelW, panelH, 12);
+  ctx.fillStyle = 'rgba(44,31,74,0.9)';
+  ctx.fill();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = C.PALETTE.outline;
+  ctx.stroke();
+
+  ctx.fillStyle = C.PALETTE.uiText;
+  ctx.font = 'bold 18px Trebuchet MS';
+  ctx.textAlign = 'left';
+  ctx.fillText('Players:', panelX + 20, panelY + 30);
+
+  let y = panelY + 60;
+  if (window.NetworkLayer.players) {
+    for (const player of window.NetworkLayer.players) {
+      const mobile = player.mobileId ? player.mobileId : '—';
+      ctx.font = '16px Trebuchet MS';
+      ctx.fillStyle = 'rgba(255,248,231,0.8)';
+      ctx.fillText(`${player.name}`, panelX + 30, y);
+      ctx.font = '14px Trebuchet MS';
+      ctx.fillStyle = 'rgba(255,248,231,0.5)';
+      ctx.fillText(`${mobile}`, panelX + 250, y);
+      y += 35;
+    }
   }
 
-  ctx.font = '16px Trebuchet MS';
+  // Instructions panel
+  const instX = C.CANVAS_W / 2 - 220;
+  const instY = C.CANVAS_H - 140;
+
+  roundedRectPath(instX, instY, 440, 100, 12);
+  ctx.fillStyle = 'rgba(44,31,74,0.9)';
+  ctx.fill();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = C.PALETTE.outline;
+  ctx.stroke();
+
+  ctx.fillStyle = C.PALETTE.uiText;
+  ctx.font = 'bold 16px Trebuchet MS';
+  ctx.textAlign = 'left';
+  ctx.fillText('S', instX + 20, instY + 25);
+  ctx.font = '14px Trebuchet MS';
+  ctx.fillStyle = 'rgba(255,248,231,0.7)';
+  ctx.fillText('Select Mobile', instX + 50, instY + 25);
+
+  ctx.fillStyle = C.PALETTE.uiText;
+  ctx.font = 'bold 16px Trebuchet MS';
+  ctx.fillText('SPACE', instX + 20, instY + 55);
   if (state.yourPlayerId === 't0p0') {
-    ctx.fillText('Press S to select mobile, SPACE to start match', C.CANVAS_W / 2, C.CANVAS_H - 80);
+    ctx.font = '14px Trebuchet MS';
+    ctx.fillStyle = 'rgba(255,248,231,0.7)';
+    ctx.fillText('Start Match', instX + 80, instY + 55);
   } else {
-    ctx.fillText('Waiting for room creator to start...', C.CANVAS_W / 2, C.CANVAS_H - 80);
+    ctx.font = '14px Trebuchet MS';
+    ctx.fillStyle = 'rgba(255,248,231,0.4)';
+    ctx.fillText('(Waiting for creator)', instX + 80, instY + 55);
   }
+
   ctx.textAlign = 'left';
   ctx.restore();
 }
 
 window.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && state.phase === 'menu') newMatch();
-  if (e.key.toLowerCase() === 'r' && state.phase === 'gameover') newMatch();
-  if (e.key.toLowerCase() === 'm' && state.phase === 'menu') showMultiplayerMenu();
-  if (e.key.toLowerCase() === 's' && state.phase === 'lobby') showMobileSelectMenu();
+  if (e.key === 'Enter' && state.phase === 'menu') {
+    if (typeof window.AudioFX !== 'undefined') window.AudioFX.playUIClick();
+    newMatch();
+  }
+  if (e.key.toLowerCase() === 'r' && state.phase === 'gameover') {
+    if (typeof window.AudioFX !== 'undefined') window.AudioFX.playUIClick();
+    newMatch();
+  }
+  if (e.key.toLowerCase() === 'm' && state.phase === 'menu') {
+    if (typeof window.AudioFX !== 'undefined') window.AudioFX.playUIClick();
+    showMultiplayerMenu();
+  }
+  if (e.key.toLowerCase() === 's' && state.phase === 'lobby') {
+    if (typeof window.AudioFX !== 'undefined') window.AudioFX.playUIClick();
+    showMobileSelectMenu();
+  }
   if (e.key === ' ' && state.phase === 'lobby' && state.yourPlayerId === 't0p0') {
     e.preventDefault();
+    if (typeof window.AudioFX !== 'undefined') window.AudioFX.playUIClick();
     window.NetworkLayer.startMatch();
   }
+  if ((e.key === '?' || e.key === '/') && state.phase === 'menu') {
+    if (typeof window.AudioFX !== 'undefined') window.AudioFX.playUIClick();
+    showHowToPlay();
+  }
 });
+
+// ============================================================
+// HOW TO PLAY
+// ============================================================
+function showHowToPlay() {
+  alert('ORBOUND — How to Play\n\n' +
+    '1. Select your mobile and adjust angle/power\n' +
+    '2. Hold SPACE or CLICK to charge your shot\n' +
+    '3. Release to fire!\n\n' +
+    'Keys:\n' +
+    '  1/2/3 - Select weapon (S1/S2/SS)\n' +
+    '  Arrow Keys - Adjust angle\n' +
+    '  SPACE/Click - Charge and fire\n' +
+    '  R - Rematch\n\n' +
+    'Goal: Eliminate all opponents!');
+}
 
 // ============================================================
 // MULTIPLAYER UI
