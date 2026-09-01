@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs');
 
 const CHROME_PATH = '/home/rjl/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome';
-const URL = 'http://localhost:8792/index.html';
+const URL = 'http://localhost:8791/index.html';
 const OUT = '/tmp/track_a_shots';
 
 const TESTS = [
