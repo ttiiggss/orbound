@@ -1,0 +1,42 @@
+{
+  "bastion": {
+    "width": 220,
+    "height": 156,
+    "aspect": 1.4103
+  },
+  "bouncer": {
+    "width": 220,
+    "height": 179,
+    "aspect": 1.2291
+  },
+  "driller": {
+    "width": 172,
+    "height": 220,
+    "aspect": 0.7818
+  },
+  "fortress": {
+    "width": 220,
+    "height": 168,
+    "aspect": 1.3095
+  },
+  "ricochet": {
+    "width": 220,
+    "height": 205,
+    "aspect": 1.0732
+  },
+  "skyfin": {
+    "width": 204,
+    "height": 220,
+    "aspect": 0.9273
+  },
+  "twinsplit": {
+    "width": 220,
+    "height": 179,
+    "aspect": 1.2291
+  },
+  "voltaic": {
+    "width": 217,
+    "height": 220,
+    "aspect": 0.9864
+  }
+}
