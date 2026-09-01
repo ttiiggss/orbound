@@ -15,7 +15,7 @@ const ctx = canvas.getContext('2d');
 // GAME STATE
 // ============================================================
 const state = {
-  phase: 'menu', // menu -> aiming -> flying -> resolving -> gameover
+  phase: 'menu', // menu -> aiming -> flying -> resolving -> gameover -> lobby
   terrain: null,
   players: [], // {id, teamIdx, mobileId, x, y, hp, maxHp, angle, power, facing, alive, name, isBot}
   turnOrder: [], // delay queue: [{playerId, readyTick}]
@@ -31,6 +31,11 @@ const state = {
   charges: {},
   log: [],
   winner: null,
+  // Network state
+  networked: false,
+  yourPlayerId: null,
+  selectedMobile: null,
+  matchStarted: false,
 };
 
 const keys = {};
@@ -207,6 +212,14 @@ function fireShot(p, slot) {
     logMsg(`${p.name}'s SS isn't charged yet!`);
     return;
   }
+
+  // In networked mode, send fire_shot message instead of simulating locally
+  if (state.networked && window.NetworkLayer && window.NetworkLayer.isInMatch()) {
+    window.NetworkLayer.fireShot(p.angle, p.power, slot);
+    logMsg(`${p.name} fired ${wep.name}!`);
+    return;
+  }
+
   const rad = (p.angle * Math.PI) / 180;
   const dir = p.facing;
   const speed = (p.power / 100) * 11 + 4;
@@ -384,6 +397,20 @@ function resolveTurnEnd() {
   if (state.phase === 'gameover') return;
   const p = activePlayer();
   const delay = p.lastShotDelay || 20; // real per-weapon delay cost; falls back to 20 if somehow unset
+
+  // In networked mode, shooter sends shot_result to server
+  if (state.networked && p.id === state.yourPlayerId && window.NetworkLayer && window.NetworkLayer.isInMatch()) {
+    const terrainDiff = []; // simplified for now
+    const playerHpDeltas = {};
+    const eliminated = [];
+    for (const player of state.players) {
+      if (!player.alive) eliminated.push(player.id);
+      playerHpDeltas[player.id] = 0; // TODO: track actual deltas
+    }
+    window.NetworkLayer.sendShotResult(terrainDiff, playerHpDeltas, eliminated);
+    return; // don't advance turn yet; server will coordinate that
+  }
+
   scheduleNextTurn(p.id, delay);
   advanceTurn();
   state.phase = 'aiming';
@@ -783,6 +810,7 @@ function drawHUD() {
   drawLog();
   if (state.phase === 'gameover') drawGameOver();
   if (state.phase === 'menu') drawMenu();
+  if (state.phase === 'lobby') drawLobby();
 }
 
 function drawTeamStatus() {
@@ -946,7 +974,36 @@ function drawMenu() {
   ctx.textAlign = 'center';
   ctx.fillText('ORBOUND', C.CANVAS_W / 2, C.CANVAS_H / 2 - 20);
   ctx.font = '20px Trebuchet MS';
-  ctx.fillText('Press ENTER to start (Practice vs Bot)', C.CANVAS_W / 2, C.CANVAS_H / 2 + 30);
+  ctx.fillText('Press ENTER for Practice vs Bot', C.CANVAS_W / 2, C.CANVAS_H / 2 + 30);
+  ctx.fillText('Press M for Multiplayer', C.CANVAS_W / 2, C.CANVAS_H / 2 + 60);
+  ctx.textAlign = 'left';
+  ctx.restore();
+}
+
+function drawLobby() {
+  ctx.save();
+  ctx.fillStyle = 'rgba(20,10,30,0.75)';
+  ctx.fillRect(0, 0, C.CANVAS_W, C.CANVAS_H);
+  ctx.fillStyle = C.PALETTE.uiText;
+  ctx.font = 'bold 40px Trebuchet MS';
+  ctx.textAlign = 'center';
+  ctx.fillText('Room: ' + window.NetworkLayer.roomCode, C.CANVAS_W / 2, 80);
+  ctx.font = '18px Trebuchet MS';
+  ctx.fillText('Players:', C.CANVAS_W / 2, 130);
+
+  let y = 160;
+  for (const player of window.NetworkLayer.players) {
+    const mobile = player.mobileId || '(no mobile)';
+    ctx.fillText(`${player.name}: ${mobile}`, C.CANVAS_W / 2 - 150, y);
+    y += 30;
+  }
+
+  ctx.font = '16px Trebuchet MS';
+  if (state.yourPlayerId === 't0p0') {
+    ctx.fillText('Press S to select mobile, SPACE to start match', C.CANVAS_W / 2, C.CANVAS_H - 80);
+  } else {
+    ctx.fillText('Waiting for room creator to start...', C.CANVAS_W / 2, C.CANVAS_H - 80);
+  }
   ctx.textAlign = 'left';
   ctx.restore();
 }
@@ -954,7 +1011,151 @@ function drawMenu() {
 window.addEventListener('keydown', e => {
   if (e.key === 'Enter' && state.phase === 'menu') newMatch();
   if (e.key.toLowerCase() === 'r' && state.phase === 'gameover') newMatch();
+  if (e.key.toLowerCase() === 'm' && state.phase === 'menu') showMultiplayerMenu();
+  if (e.key.toLowerCase() === 's' && state.phase === 'lobby') showMobileSelectMenu();
+  if (e.key === ' ' && state.phase === 'lobby' && state.yourPlayerId === 't0p0') {
+    e.preventDefault();
+    window.NetworkLayer.startMatch();
+  }
 });
+
+// ============================================================
+// MULTIPLAYER UI
+// ============================================================
+function showMultiplayerMenu() {
+  const action = prompt('Create (c) or Join (j) room?').toLowerCase();
+  if (action === 'c') {
+    createMultiplayerRoom();
+  } else if (action === 'j') {
+    joinMultiplayerRoom();
+  }
+}
+
+function createMultiplayerRoom() {
+  const playerName = prompt('Enter your name:');
+  if (!playerName) return;
+  const mode = prompt('Game mode (1v1, 2v2, 3v3, 4v4):') || '1v1';
+
+  (async () => {
+    try {
+      await window.NetworkLayer.connect('ws://localhost:8081');
+      await window.NetworkLayer.createRoom(playerName, mode);
+      state.networked = true;
+      state.phase = 'lobby';
+      state.yourPlayerId = window.NetworkLayer.playerId;
+      state.players = [];
+      logMsg('Room created! ' + window.NetworkLayer.roomCode);
+    } catch (e) {
+      logMsg('Error: ' + e.message);
+    }
+  })();
+}
+
+function joinMultiplayerRoom() {
+  const roomCode = prompt('Enter room code:');
+  if (!roomCode) return;
+  const playerName = prompt('Enter your name:');
+  if (!playerName) return;
+
+  (async () => {
+    try {
+      await window.NetworkLayer.connect('ws://localhost:8081');
+      await window.NetworkLayer.joinRoom(roomCode, playerName);
+      state.networked = true;
+      state.phase = 'lobby';
+      state.yourPlayerId = window.NetworkLayer.playerId;
+      state.players = [];
+      logMsg('Joined room! ' + window.NetworkLayer.roomCode);
+    } catch (e) {
+      logMsg('Error: ' + e.message);
+    }
+  })();
+}
+
+function showMobileSelectMenu() {
+  const mobileId = prompt('Select mobile (bastion, driller, twinsplit, bouncer, fortress, skyfin, ricochet, voltaic):');
+  if (mobileId && MOBILE_DEFS[mobileId]) {
+    state.selectedMobile = mobileId;
+    window.NetworkLayer.selectMobile(mobileId);
+    logMsg('Selected ' + mobileId);
+  }
+}
+
+// ============================================================
+// NETWORK EVENT HANDLERS
+// ============================================================
+function setupNetworkHandlers() {
+  if (!window.NetworkLayer) return;
+
+  window.NetworkLayer.onRoomStateUpdated = (msg) => {
+    // Update lobby display
+    if (state.phase === 'lobby') {
+      // Game will re-render next frame with updated player list
+    }
+  };
+
+  window.NetworkLayer.onMatchStarted = (msg) => {
+    // Start the networked match
+    state.yourPlayerId = window.NetworkLayer.playerId;
+    state.networked = true;
+    state.matchStarted = true;
+    newMatch(msg.terrainSeed, msg.roster);
+  };
+
+  window.NetworkLayer.onShotFired = (msg) => {
+    if (state.phase !== 'aiming') return;
+    const p = getPlayer(msg.playerId);
+    if (!p) return;
+
+    if (!msg.isYourShot) {
+      // Other player's shot: apply their angle/power and fire
+      p.angle = msg.angle;
+      p.power = msg.power;
+      fireShot(p, msg.slot);
+    } else {
+      // Your shot was confirmed by server, phase transitions to flying automatically
+      state.phase = 'flying';
+    }
+  };
+
+  window.NetworkLayer.onResultConfirmed = (msg) => {
+    // Apply terrain changes
+    if (msg.terrainDiff) {
+      for (const diff of msg.terrainDiff) {
+        // terrainDiff is a simplified format; in a real game this would be more structured
+        // For now, we trust local physics already ran
+      }
+    }
+
+    // Apply HP deltas for non-shooter clients
+    if (msg.playerHpDeltas) {
+      for (const playerId in msg.playerHpDeltas) {
+        const p = getPlayer(playerId);
+        if (p) {
+          p.hp = Math.max(0, p.hp + msg.playerHpDeltas[playerId]);
+        }
+      }
+    }
+
+    // Mark eliminated players
+    if (msg.eliminated && Array.isArray(msg.eliminated)) {
+      for (const playerId of msg.eliminated) {
+        const p = getPlayer(playerId);
+        if (p) p.alive = false;
+      }
+    }
+  };
+
+  window.NetworkLayer.onGameOver = (msg) => {
+    state.phase = 'gameover';
+    state.winner = msg.winningTeam;
+  };
+
+  window.NetworkLayer.onError = (err) => {
+    console.error('Network error:', err);
+    logMsg('Network error: ' + err.message);
+  };
+}
 
 // ============================================================
 // MAIN LOOP
@@ -1027,6 +1228,9 @@ update = function() {
 if (window.NostrLayer) {
   window.NostrLayer.init().catch(e => console.warn('Nostr init failed:', e));
 }
+
+// Initialize network layer
+setupNetworkHandlers();
 
 // Kick off sprite loading immediately; the game loop renders fine before
 // they're ready (falls back to vector art per-mobile until each image loads).
