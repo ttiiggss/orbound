@@ -193,6 +193,9 @@ wss://relay.stoner.com
 wss://relay.minds.com
 wss://relay.orangepill.dev
 wss://relay.plebstr.com
+wss://nostr.einundzwanzig.space
+wss://relay.nostr.ch
+wss://nostr.redimension.su
 ```
 
 **Audit result:** ✓ 0 primal.net domains, ✓ 47 distinct relays, ✓ all public/well-known
