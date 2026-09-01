@@ -208,14 +208,10 @@ function stepProjectiles() {
       continue;
     }
 
-    // Wall bounce (screen edges) for Ricochet's wallbounce behavior
-    if (proj.weapon.behavior === 'wallbounce' && proj.bounces < proj.maxBounces) {
-      if (proj.x < 4 || proj.x > C.CANVAS_W - 4) {
-        proj.vx *= -0.85;
-        proj.x = C.clamp(proj.x, 5, C.CANVAS_W - 5);
-        proj.bounces++;
-        spawnParticles(proj.x, proj.y, 6, '#ffffff');
-      }
+    // Skystrike: vertical fall to target x-position (special aerial behavior)
+    if (proj.weapon.behavior === 'skystrike') {
+      proj.vx *= 0.92; // Gradually reduce horizontal drift
+      if (Math.abs(proj.vx) < 0.15) proj.vx = 0; // Snap to vertical once nearly zero
     }
 
     // Terrain collision
@@ -255,6 +251,17 @@ function handleTerrainHit(proj) {
     spawnParticles(proj.x, proj.y, 8, '#5ee08a');
     proj.vy *= -0.55;
     proj.vx *= 0.9;
+    proj.y -= 4;
+    proj.bounces++;
+    return;
+  }
+  if (behavior === 'wallbounce' && proj.bounces < proj.maxBounces) {
+    // Wall bounce: bounces off terrain like bounce, but with tighter bounce
+    dealAreaDamage(proj.x, proj.y, proj.weapon.radius * 0.5, proj.weapon.power * 0.4, proj);
+    state.terrain.carve(proj.x, proj.y, proj.weapon.radius * 0.35);
+    spawnParticles(proj.x, proj.y, 6, '#e0d4ff');
+    proj.vy *= -0.6;
+    proj.vx *= 0.85;
     proj.y -= 4;
     proj.bounces++;
     return;
