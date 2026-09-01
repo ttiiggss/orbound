@@ -37,10 +37,27 @@ const state = {
   yourPlayerId: null,
   selectedMobile: null,
   matchStarted: false,
+  // In-canvas text input overlay (replaces browser prompt()/alert() so the
+  // multiplayer lobby flow doesn't drop out of the game's own UI - prompt()
+  // is also a blocking call that would freeze automated/headless testing).
+  textInput: null, // { title, placeholder, value, onSubmit(value), onCancel() } | null
+  howToPlayOpen: false,
 };
 
 const keys = {};
-window.addEventListener('keydown', e => { keys[e.key] = true; handleKeyDown(e); });
+window.addEventListener('keydown', e => {
+  // Text input overlay (if open) captures ALL keystrokes first and blocks
+  // them from reaching normal gameplay/menu key handling.
+  if (handleTextInputKey(e)) return;
+  // How-to-play overlay: any key closes it and is otherwise consumed.
+  if (state.howToPlayOpen) {
+    state.howToPlayOpen = false;
+    if (typeof window.AudioFX !== 'undefined') window.AudioFX.playUIClick();
+    return;
+  }
+  keys[e.key] = true;
+  handleKeyDown(e);
+});
 window.addEventListener('keyup', e => { keys[e.key] = false; });
 
 let mouseDown = false;
@@ -1014,6 +1031,8 @@ function drawHUD() {
   if (state.phase === 'gameover') drawGameOver();
   if (state.phase === 'menu') drawMenu();
   if (state.phase === 'lobby') drawLobby();
+  drawHowToPlayOverlay();
+  drawTextInputOverlay(); // drawn last so it overlays everything else
 }
 
 function drawTeamStatus() {
@@ -1347,6 +1366,18 @@ function drawLobby() {
 }
 
 window.addEventListener('keydown', e => {
+  // Guard: while the text input overlay or how-to-play overlay is open,
+  // the FIRST keydown listener (registered above, near state init) already
+  // fully owns keyboard input for those modes. Without this guard, menu
+  // hotkeys like 's' (mobile select) or 'm' (multiplayer) would ALSO fire
+  // here on every matching keystroke typed INTO the overlay (both
+  // listeners run independently on every keydown event, since they're
+  // separate addEventListener registrations) - e.g. typing "bastion" would
+  // re-trigger showMobileSelectMenu() on the embedded 's', silently
+  // resetting the input mid-type. Found via direct testing: typing
+  // "bastion" was landing in state as just "tion".
+  if (state.textInput || state.howToPlayOpen) return;
+
   if (e.key === 'Enter' && state.phase === 'menu') {
     if (typeof window.AudioFX !== 'undefined') window.AudioFX.playUIClick();
     newMatch();
@@ -1377,36 +1408,176 @@ window.addEventListener('keydown', e => {
 // ============================================================
 // HOW TO PLAY
 // ============================================================
+const HOW_TO_PLAY_LINES = [
+  '1. Select your mobile and adjust angle/power',
+  '2. Hold SPACE or CLICK to charge your shot',
+  '3. Release to fire!',
+  '',
+  'Keys:',
+  '  1/2/3  -  Select weapon (S1/S2/SS)',
+  '  Arrow Keys  -  Adjust angle',
+  '  SPACE/Click  -  Charge and fire',
+  '  R  -  Rematch',
+  '',
+  'Goal: Eliminate all opponents!',
+  '',
+  '(press any key to close)',
+];
+
 function showHowToPlay() {
-  alert('ORBOUND — How to Play\n\n' +
-    '1. Select your mobile and adjust angle/power\n' +
-    '2. Hold SPACE or CLICK to charge your shot\n' +
-    '3. Release to fire!\n\n' +
-    'Keys:\n' +
-    '  1/2/3 - Select weapon (S1/S2/SS)\n' +
-    '  Arrow Keys - Adjust angle\n' +
-    '  SPACE/Click - Charge and fire\n' +
-    '  R - Rematch\n\n' +
-    'Goal: Eliminate all opponents!');
+  state.howToPlayOpen = true;
+}
+
+function drawHowToPlayOverlay() {
+  if (!state.howToPlayOpen) return;
+  ctx.save();
+  ctx.fillStyle = 'rgba(10,10,20,0.7)';
+  ctx.fillRect(0, 0, C.CANVAS_W, C.CANVAS_H);
+
+  const boxW = 520, boxH = 400;
+  const boxX = (C.CANVAS_W - boxW) / 2, boxY = (C.CANVAS_H - boxH) / 2;
+  roundedRectPath(boxX, boxY, boxW, boxH, 14);
+  ctx.fillStyle = C.PALETTE.uiPanel;
+  ctx.fill();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = C.PALETTE.outline;
+  ctx.stroke();
+
+  ctx.fillStyle = '#ffcb3d';
+  ctx.font = 'bold 26px Trebuchet MS';
+  ctx.textAlign = 'center';
+  ctx.fillText('ORBOUND — How to Play', C.CANVAS_W / 2, boxY + 42);
+
+  ctx.textAlign = 'left';
+  ctx.font = '17px Trebuchet MS';
+  let ly = boxY + 82;
+  for (const line of HOW_TO_PLAY_LINES) {
+    ctx.fillStyle = line.startsWith('(press') ? 'rgba(255,248,231,0.5)' : '#fff8e7';
+    ctx.fillText(line, boxX + 32, ly);
+    ly += 24;
+  }
+  ctx.textAlign = 'left';
+  ctx.restore();
 }
 
 // ============================================================
 // MULTIPLAYER UI
 // ============================================================
-function showMultiplayerMenu() {
-  const action = prompt('Create (c) or Join (j) room?').toLowerCase();
-  if (action === 'c') {
-    createMultiplayerRoom();
-  } else if (action === 'j') {
-    joinMultiplayerRoom();
-  }
+// Real in-canvas text input overlay, replacing browser prompt() dialogs.
+// openTextInput() sets state.textInput; the keydown handler below appends/
+// backspaces state.textInput.value and calls onSubmit(value) on Enter (or
+// onCancel() on Escape). drawTextInputOverlay() (called from drawHUD when
+// active) renders it in the game's own established panel style.
+function openTextInput({ title, placeholder = '', initial = '', onSubmit, onCancel }) {
+  state.textInput = { title, placeholder, value: initial, onSubmit, onCancel };
 }
 
-function createMultiplayerRoom() {
-  const playerName = prompt('Enter your name:');
-  if (!playerName) return;
-  const mode = prompt('Game mode (1v1, 2v2, 3v3, 4v4):') || '1v1';
+function closeTextInput() {
+  state.textInput = null;
+}
 
+function drawTextInputOverlay() {
+  const t = state.textInput;
+  if (!t) return;
+  ctx.save();
+  ctx.fillStyle = 'rgba(10,10,20,0.6)';
+  ctx.fillRect(0, 0, C.CANVAS_W, C.CANVAS_H);
+
+  const boxW = 480, boxH = 160;
+  const boxX = (C.CANVAS_W - boxW) / 2, boxY = (C.CANVAS_H - boxH) / 2;
+  roundedRectPath(boxX, boxY, boxW, boxH, 12);
+  ctx.fillStyle = C.PALETTE.uiPanel;
+  ctx.fill();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = C.PALETTE.outline;
+  ctx.stroke();
+
+  ctx.fillStyle = '#ffcb3d';
+  ctx.font = 'bold 22px Trebuchet MS';
+  ctx.textAlign = 'center';
+  ctx.fillText(t.title, C.CANVAS_W / 2, boxY + 38);
+
+  const fieldX = boxX + 30, fieldY = boxY + 60, fieldW = boxW - 60, fieldH = 44;
+  roundedRectPath(fieldX, fieldY, fieldW, fieldH, 8);
+  ctx.fillStyle = '#1a1626';
+  ctx.fill();
+  ctx.strokeStyle = '#5ee08a';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.textAlign = 'left';
+  ctx.font = '20px Trebuchet MS';
+  const displayText = t.value || t.placeholder;
+  ctx.fillStyle = t.value ? '#fff8e7' : 'rgba(255,248,231,0.4)';
+  ctx.fillText(displayText, fieldX + 12, fieldY + 29);
+
+  // Blinking cursor after the typed text
+  if (Math.floor(performance.now() / 500) % 2 === 0) {
+    const textW = ctx.measureText(t.value).width;
+    ctx.fillStyle = '#5ee08a';
+    ctx.fillRect(fieldX + 12 + textW + 2, fieldY + 8, 2, fieldH - 16);
+  }
+
+  ctx.textAlign = 'center';
+  ctx.font = '14px Trebuchet MS';
+  ctx.fillStyle = 'rgba(255,248,231,0.6)';
+  ctx.fillText('ENTER to confirm  •  ESC to cancel', C.CANVAS_W / 2, boxY + boxH - 18);
+  ctx.textAlign = 'left';
+  ctx.restore();
+}
+
+function handleTextInputKey(e) {
+  const t = state.textInput;
+  if (!t) return false;
+  e.preventDefault();
+  if (e.key === 'Enter') {
+    const value = t.value;
+    closeTextInput();
+    if (typeof window.AudioFX !== 'undefined') window.AudioFX.playUIClick();
+    if (t.onSubmit) t.onSubmit(value);
+  } else if (e.key === 'Escape') {
+    closeTextInput();
+    if (t.onCancel) t.onCancel();
+  } else if (e.key === 'Backspace') {
+    t.value = t.value.slice(0, -1);
+  } else if (e.key.length === 1 && t.value.length < 24) {
+    // Single printable character (letters/digits/punctuation); ignore
+    // modifier/navigation keys which have multi-char e.key values.
+    t.value += e.key;
+  }
+  return true;
+}
+
+// Multiplayer flow, chained through openTextInput() steps instead of
+// sequential blocking prompt() calls.
+function showMultiplayerMenu() {
+  openTextInput({
+    title: 'Create (c) or Join (j) a room?',
+    placeholder: 'c or j',
+    onSubmit: (action) => {
+      const a = action.trim().toLowerCase();
+      if (a === 'c') createMultiplayerRoomFlow();
+      else if (a === 'j') joinMultiplayerRoomFlow();
+    },
+  });
+}
+
+function createMultiplayerRoomFlow() {
+  openTextInput({
+    title: 'Enter your name',
+    placeholder: 'Player name',
+    onSubmit: (playerName) => {
+      if (!playerName) return;
+      openTextInput({
+        title: 'Game mode',
+        placeholder: '1v1, 2v2, 3v3, or 4v4 (default 1v1)',
+        onSubmit: (mode) => connectAndCreateRoom(playerName, (mode || '').trim() || '1v1'),
+      });
+    },
+  });
+}
+
+function connectAndCreateRoom(playerName, mode) {
   (async () => {
     try {
       await window.NetworkLayer.connect('ws://localhost:8081');
@@ -1422,12 +1593,25 @@ function createMultiplayerRoom() {
   })();
 }
 
-function joinMultiplayerRoom() {
-  const roomCode = prompt('Enter room code:');
-  if (!roomCode) return;
-  const playerName = prompt('Enter your name:');
-  if (!playerName) return;
+function joinMultiplayerRoomFlow() {
+  openTextInput({
+    title: 'Enter room code',
+    placeholder: '6-character code',
+    onSubmit: (roomCode) => {
+      if (!roomCode) return;
+      openTextInput({
+        title: 'Enter your name',
+        placeholder: 'Player name',
+        onSubmit: (playerName) => {
+          if (!playerName) return;
+          connectAndJoinRoom(roomCode, playerName);
+        },
+      });
+    },
+  });
+}
 
+function connectAndJoinRoom(roomCode, playerName) {
   (async () => {
     try {
       await window.NetworkLayer.connect('ws://localhost:8081');
@@ -1444,12 +1628,20 @@ function joinMultiplayerRoom() {
 }
 
 function showMobileSelectMenu() {
-  const mobileId = prompt('Select mobile (bastion, driller, twinsplit, bouncer, fortress, skyfin, ricochet, voltaic):');
-  if (mobileId && MOBILE_DEFS[mobileId]) {
-    state.selectedMobile = mobileId;
-    window.NetworkLayer.selectMobile(mobileId);
-    logMsg('Selected ' + mobileId);
-  }
+  openTextInput({
+    title: 'Select mobile',
+    placeholder: 'bastion/driller/twinsplit/bouncer/fortress/skyfin/ricochet/voltaic',
+    onSubmit: (mobileId) => {
+      const id = (mobileId || '').trim().toLowerCase();
+      if (id && MOBILE_DEFS[id]) {
+        state.selectedMobile = id;
+        window.NetworkLayer.selectMobile(id);
+        logMsg('Selected ' + id);
+      } else if (id) {
+        logMsg('Unknown mobile: ' + id);
+      }
+    },
+  });
 }
 
 
