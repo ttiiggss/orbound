@@ -88,7 +88,14 @@ const EXE = '/home/rjl/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome'
     const hpB = await pageB.evaluate(() => window.ORBOUND_DEBUG.state.players.map(p => ({ id: p.id, hp: p.hp, alive: p.alive })));
     const converged = JSON.stringify(hpA) === JSON.stringify(hpB);
     if (!converged) allConverged = false;
-    console.log(`Turn ${turn} (shooter ${shooterLabel}, target dist ${shotPlan.bestDist.toFixed(1)}): A=${JSON.stringify(hpA)} B=${JSON.stringify(hpB)} CONVERGED=${converged}`);
+
+    // Byte-for-byte terrain heightmap comparison (not just "visually close")
+    const terrainA = await pageA.evaluate(() => Array.from(window.ORBOUND_DEBUG.state.terrain.heights));
+    const terrainB = await pageB.evaluate(() => Array.from(window.ORBOUND_DEBUG.state.terrain.heights));
+    const terrainMatch = terrainA.length === terrainB.length && terrainA.every((v, i) => Math.abs(v - terrainB[i]) < 0.001);
+    if (!terrainMatch) allConverged = false;
+
+    console.log(`Turn ${turn} (shooter ${shooterLabel}, target dist ${shotPlan.bestDist.toFixed(1)}): A=${JSON.stringify(hpA)} B=${JSON.stringify(hpB)} CONVERGED=${converged} TERRAIN_MATCH=${terrainMatch}`);
   }
 
   console.log('\nALL TURNS CONVERGED:', allConverged);

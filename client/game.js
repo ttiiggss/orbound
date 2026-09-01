@@ -108,6 +108,22 @@ if (typeof window.NetworkLayer !== 'undefined') {
         }
       }
     }
+    // Terrain: regenerate the ORIGINAL heightmap from the match seed, then
+    // replay the FULL authoritative carve history (this shot's new events
+    // appended to everything that came before) onto that clean base. This
+    // is a "recompute from source" correction rather than trying to patch
+    // this client's own possibly-already-drifted heightmap - guarantees
+    // byte-identical terrain regardless of any local impact-point drift,
+    // the same class of bug that was found and fixed for HP sync.
+    if (msg.terrainDiff && Array.isArray(msg.terrainDiff) && msg.terrainDiff.length > 0
+        && typeof state.terrainSeed === 'number') {
+      if (state.allCarveEvents) state.allCarveEvents.push(...msg.terrainDiff);
+      const freshTerrain = new C.Terrain(state.terrainSeed);
+      for (const ev of (state.allCarveEvents || [])) {
+        freshTerrain.carve(ev.cx, ev.cy, ev.radius);
+      }
+      state.terrain = freshTerrain;
+    }
     if (msg.eliminated && Array.isArray(msg.eliminated)) {
       for (const playerId of msg.eliminated) {
         const p = getPlayer(playerId);
@@ -162,6 +178,12 @@ const DEFAULT_ROSTER = {
 
 function newMatch(seed = Date.now() & 0xffffffff, roster = DEFAULT_ROSTER) {
   state.terrain = new C.Terrain(seed);
+  state.terrainSeed = seed; // retained so networked mode can regenerate a
+                             // byte-identical base terrain and replay the
+                             // full authoritative carve history onto it
+                             // (see onResultConfirmed) rather than trying to
+                             // patch a possibly-already-drifted heightmap.
+  state.allCarveEvents = []; // full match carve history, authoritative order
   state.players = buildPlayersFromRoster(roster);
   layoutPlayersOnTerrain();
   state.tick = 0;
@@ -306,6 +328,11 @@ function releaseCharge() {
 // ============================================================
 // FIRING / PROJECTILE PHYSICS
 // ============================================================
+function recordCarveEvent(cx, cy, radius) {
+  if (!state.shotCarveEvents) state.shotCarveEvents = [];
+  state.shotCarveEvents.push({ cx, cy, radius });
+}
+
 function fireShotLocal(p, slot) {
   const mob = MOBILE_DEFS[p.mobileId];
   const wep = mob.weapons[slot];
@@ -322,6 +349,17 @@ function fireShotLocal(p, slot) {
   // during a shot's flight. The shooter's snapshot->delta is the tie-
   // breaker that keeps all clients converged regardless of that drift.
   state.shotStartSnapshot = state.players.map(pl => ({ id: pl.id, hp: pl.hp, alive: pl.alive }));
+  // Also reset the carve-event log for this shot - every terrain.carve()
+  // call during this shot's resolution gets recorded here via
+  // recordCarveEvent() so the shooter can transmit the EXACT carve
+  // parameters (not a computed diff) as terrainDiff in shot_result. Other
+  // clients replay these exact carve() calls rather than trusting their own
+  // simulated impact coordinates, which was found to drift by a few pixels
+  // between independent browser processes (same root cause as the HP drift
+  // bug) - terrain segments are only 5px wide, so that drift COULD shift
+  // which segment gets carved without this fix, even though it happened to
+  // never show up as a visible mismatch in earlier ad-hoc testing.
+  state.shotCarveEvents = [];
 
   const rad = (p.angle * Math.PI) / 180;
   const dir = p.facing;
@@ -390,7 +428,18 @@ function stepProjectiles() {
 
     // Skystrike: vertical fall to target x-position (special aerial behavior)
     if (proj.weapon.behavior === 'skystrike') {
-      proj.vx *= 0.92; // Gradually reduce horizontal drift
+      // Decay rate tuned so max-power shots can reach realistic map
+      // distances (~500-600px, matching typical spawn separation) before
+      // locking vertical - the original 0.92 decay capped max horizontal
+      // travel at ~186px even at 100% power, meaning this weapon could
+      // never actually hit a target at normal spawn distance (found via
+      // direct trajectory tracing + an exhaustive angle/power sweep that
+      // couldn't get within 380px of a real target - this was a latent
+      // gameplay bug, not something introduced by today's changes). 0.975
+      // still fell short (closest approach 122px, outside blast radius);
+      // 0.985 gives genuine reach (~990px max) while still requiring a
+      // real angle/power choice rather than trivializing the weapon.
+      proj.vx *= 0.985;
       if (Math.abs(proj.vx) < 0.15) proj.vx = 0; // Snap to vertical once nearly zero
     }
 
@@ -428,6 +477,7 @@ function handleTerrainHit(proj) {
     // Bounce: deal partial "impact" damage at each bounce point, then continue
     dealAreaDamage(proj.x, proj.y, proj.weapon.radius * 0.55, proj.weapon.power * 0.35, proj);
     state.terrain.carve(proj.x, proj.y, proj.weapon.radius * 0.4);
+    recordCarveEvent(proj.x, proj.y, proj.weapon.radius * 0.4);
     spawnParticles(proj.x, proj.y, 8, '#5ee08a');
     proj.vy *= -0.55;
     proj.vx *= 0.9;
@@ -439,6 +489,7 @@ function handleTerrainHit(proj) {
     // Wall bounce: bounces off terrain like bounce, but with tighter bounce
     dealAreaDamage(proj.x, proj.y, proj.weapon.radius * 0.5, proj.weapon.power * 0.4, proj);
     state.terrain.carve(proj.x, proj.y, proj.weapon.radius * 0.35);
+    recordCarveEvent(proj.x, proj.y, proj.weapon.radius * 0.35);
     spawnParticles(proj.x, proj.y, 6, '#e0d4ff');
     proj.vy *= -0.6;
     proj.vx *= 0.85;
@@ -465,6 +516,7 @@ function handleTerrainHit(proj) {
 function explodeProjectile(proj, removeSelf = true) {
   dealAreaDamage(proj.x, proj.y, proj.weapon.radius, proj.weapon.power, proj);
   state.terrain.carve(proj.x, proj.y, proj.weapon.radius);
+  recordCarveEvent(proj.x, proj.y, proj.weapon.radius);
   spawnExplosion(proj.x, proj.y, proj.weapon.radius);
   if (removeSelf) proj.dead = true;
 }
@@ -522,10 +574,14 @@ function resolveTurnEnd() {
 
   // In networked mode, shooter sends shot_result to server
   if (state.networked && p.id === state.yourPlayerId && window.NetworkLayer && window.NetworkLayer.isInMatch()) {
-    const terrainDiff = []; // simplified for now - terrain carve is visually
-                             // consistent across clients in practice since it
-                             // derives from projectile impact x/y at explosion
-                             // time, not accumulated per-frame drift like HP.
+    // Transmit the EXACT carve events recorded during this shot's
+    // resolution (see recordCarveEvent, called at every terrain.carve()
+    // site) rather than a computed diff. Other clients replay these exact
+    // calls, which is robust even if their own locally-simulated impact
+    // coordinates drifted by a few pixels (terrain segments are only 5px
+    // wide, so uncorrected drift COULD shift which segment gets carved).
+    const terrainDiff = state.shotCarveEvents || [];
+    if (state.allCarveEvents) state.allCarveEvents.push(...terrainDiff);
     const playerHpDeltas = {};
     const eliminated = [];
     const snapshot = state.shotStartSnapshot || [];

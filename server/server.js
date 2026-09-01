@@ -273,6 +273,14 @@ function handleStartMatch(ws, msg, clientRoomInfo) {
       // For now, use a reasonable default
       room.playerHp[playerId] = 100;
     }
+    // Initialize SS charge meters (mirrors client's state.charges: builds by
+    // +22 per resolved shot, capped 100, consumed on SS use). Tracked
+    // server-side so fire_shot can genuinely validate a charge requirement
+    // instead of trusting the client not to fire an under-charged special.
+    room.playerCharge = {};
+    for (const playerId of playerIds) {
+      room.playerCharge[playerId] = 0;
+    }
 
     // Broadcast match started to all clients
     const rosterConfig = buildRosterFromRoom(room);
@@ -316,7 +324,20 @@ function handleFireShot(ws, msg, clientRoomInfo) {
       return;
     }
 
-    // TODO: Check charge requirement for SS
+    // Real server-side charge validation: every SS weapon in this game
+    // requires exactly 100/100 charge (see chargeReq:100 on every mobile's
+    // ss weapon in client/mobiles.js). The charge meter itself is tracked
+    // server-side (see handleShotResult, which increments it the same way
+    // the client's dealAreaDamage does: +22 per resolved shot, capped 100)
+    // so a malicious/buggy client cannot fire an under-charged special by
+    // simply not enforcing the cooldown on its own end.
+    if (slot === 'ss') {
+      const charge = (room.playerCharge && room.playerCharge[playerId]) || 0;
+      if (charge < 100) {
+        ws.send(JSON.stringify({ type: 'shot_rejected', reason: 'not_charged' }));
+        return;
+      }
+    }
 
     // Broadcast shot fired to all clients
     room.shotInProgress = { playerId, angle, power, slot, wind, shooterWs: ws };
@@ -353,6 +374,22 @@ function handleShotResult(ws, msg, clientRoomInfo) {
     if (!room.shotInProgress || room.shotInProgress.playerId !== clientRoomInfo.playerId) {
       ws.send(JSON.stringify({ type: 'error', message: 'shot_result from non-shooter' }));
       return;
+    }
+
+    // Update the shooter's SS charge meter: firing an SS consumes it back to
+    // 0, any other weapon builds it by +22 (capped 100) - mirrors the
+    // client's dealAreaDamage logic exactly so server-side validation in
+    // handleFireShot stays consistent with what players actually see on
+    // their own charge meter UI.
+    const firedSlot = room.shotInProgress.slot;
+    if (!room.playerCharge) room.playerCharge = {};
+    if (firedSlot === 'ss') {
+      room.playerCharge[clientRoomInfo.playerId] = 0;
+    } else {
+      room.playerCharge[clientRoomInfo.playerId] = Math.min(
+        100,
+        (room.playerCharge[clientRoomInfo.playerId] || 0) + 22
+      );
     }
 
     // Apply terrain changes

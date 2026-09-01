@@ -5,7 +5,7 @@ const { chromium } = require('playwright-core');
 const path = require('path');
 
 const CHROME_PATH = '/home/rjl/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome';
-const URL = 'http://localhost:8795/index.html';
+const URL = 'http://localhost:8791/index.html';
 const OUT = '/tmp/orbound_sprite_shots';
 
 (async () => {

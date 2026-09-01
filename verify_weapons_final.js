@@ -113,7 +113,13 @@ async function testWeapon(page, test, idx) {
 
     bounceCount = Math.max(bounceCount, projState.bounces);
     if (projState.burrowed) burrowDetected = true;
-    if (projState.behavior === 'split' && projState.count > 1) splitDetected = true;
+    // NOTE: split-child projectiles are pushed with behavior:'direct' (see
+    // handleTerrainHit's split branch in game.js), not 'split' - so
+    // checking projState.behavior==='split' here can never be true at the
+    // exact moment count>1 first becomes true (a real test-harness bug,
+    // not a game bug - confirmed by direct testing that split weapons DO
+    // deal real damage reliably). Detect split purely by projectile count.
+    if (projState.count > 1) splitDetected = true;
     if (projState.behavior === 'skystrike' && Math.abs(projState.vx) < 0.15) skystrikeBecameVertical = true;
 
     if (i % 5 === 0) {
