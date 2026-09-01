@@ -47,6 +47,58 @@ let chargeStart = 0;
 let currentWeaponSlot = 's1';
 
 // ============================================================
+// EARLY NETWORK SETUP
+// ============================================================
+// Set up network event handlers as soon as this script loads, before any async operations
+if (typeof window.NetworkLayer !== 'undefined') {
+  window.NetworkLayer.onMatchStarted = (msg) => {
+    state.yourPlayerId = window.NetworkLayer.playerId;
+    state.networked = true;
+    state.matchStarted = true;
+    newMatch(msg.terrainSeed, msg.roster);
+  };
+
+  window.NetworkLayer.onShotFired = (msg) => {
+    if (state.phase !== 'aiming') return;
+    const p = getPlayer(msg.playerId);
+    if (!p) return;
+
+    // Update angle/power for the firing player
+    p.angle = msg.angle;
+    p.power = msg.power;
+    // Use fireShotLocal to avoid re-triggering network message
+    fireShotLocal(p, msg.slot);
+  };
+
+  window.NetworkLayer.onResultConfirmed = (msg) => {
+    if (msg.playerHpDeltas) {
+      for (const playerId in msg.playerHpDeltas) {
+        const p = getPlayer(playerId);
+        if (p) {
+          p.hp = Math.max(0, p.hp + msg.playerHpDeltas[playerId]);
+        }
+      }
+    }
+    if (msg.eliminated && Array.isArray(msg.eliminated)) {
+      for (const playerId of msg.eliminated) {
+        const p = getPlayer(playerId);
+        if (p) p.alive = false;
+      }
+    }
+  };
+
+  window.NetworkLayer.onGameOver = (msg) => {
+    state.phase = 'gameover';
+    state.winner = msg.winningTeam;
+  };
+
+  window.NetworkLayer.onError = (err) => {
+    console.error('Network error:', err);
+    logMsg('Network error: ' + err.message);
+  };
+}
+
+// ============================================================
 // SETUP
 // ============================================================
 // Default roster used when newMatch() is called with no config (menu ->
@@ -204,21 +256,10 @@ function releaseCharge() {
 // ============================================================
 // FIRING / PROJECTILE PHYSICS
 // ============================================================
-function fireShot(p, slot) {
+function fireShotLocal(p, slot) {
   const mob = MOBILE_DEFS[p.mobileId];
   const wep = mob.weapons[slot];
   if (!wep) return;
-  if (wep.chargeReq && (state.charges[p.id] || 0) < wep.chargeReq) {
-    logMsg(`${p.name}'s SS isn't charged yet!`);
-    return;
-  }
-
-  // In networked mode, send fire_shot message instead of simulating locally
-  if (state.networked && window.NetworkLayer && window.NetworkLayer.isInMatch()) {
-    window.NetworkLayer.fireShot(p.angle, p.power, slot);
-    logMsg(`${p.name} fired ${wep.name}!`);
-    return;
-  }
 
   const rad = (p.angle * Math.PI) / 180;
   const dir = p.facing;
@@ -236,8 +277,27 @@ function fireShot(p, slot) {
     splitDone: false,
   });
   state.phase = 'flying';
-  state.charges[p.id] = 0; // firing resets charge (simplification for v1)
-  p.lastShotDelay = wep.delay; // used by resolveTurnEnd() to schedule the real return-to-queue delay
+  state.charges[p.id] = 0;
+  p.lastShotDelay = wep.delay;
+}
+
+function fireShot(p, slot) {
+  const mob = MOBILE_DEFS[p.mobileId];
+  const wep = mob.weapons[slot];
+  if (!wep) return;
+  if (wep.chargeReq && (state.charges[p.id] || 0) < wep.chargeReq) {
+    logMsg(`${p.name}'s SS isn't charged yet!`);
+    return;
+  }
+
+  // In networked mode, send fire_shot message instead of simulating locally
+  if (state.networked && window.NetworkLayer && window.NetworkLayer.isInMatch()) {
+    window.NetworkLayer.fireShot(p.angle, p.power, slot);
+    logMsg(`${p.name} fired ${wep.name}!`);
+    return;
+  }
+
+  fireShotLocal(p, slot);
   logMsg(`${p.name} fired ${wep.name}!`);
 }
 
@@ -1081,81 +1141,6 @@ function showMobileSelectMenu() {
   }
 }
 
-// ============================================================
-// NETWORK EVENT HANDLERS
-// ============================================================
-function setupNetworkHandlers() {
-  if (!window.NetworkLayer) return;
-
-  window.NetworkLayer.onRoomStateUpdated = (msg) => {
-    // Update lobby display
-    if (state.phase === 'lobby') {
-      // Game will re-render next frame with updated player list
-    }
-  };
-
-  window.NetworkLayer.onMatchStarted = (msg) => {
-    // Start the networked match
-    state.yourPlayerId = window.NetworkLayer.playerId;
-    state.networked = true;
-    state.matchStarted = true;
-    newMatch(msg.terrainSeed, msg.roster);
-  };
-
-  window.NetworkLayer.onShotFired = (msg) => {
-    if (state.phase !== 'aiming') return;
-    const p = getPlayer(msg.playerId);
-    if (!p) return;
-
-    if (!msg.isYourShot) {
-      // Other player's shot: apply their angle/power and fire
-      p.angle = msg.angle;
-      p.power = msg.power;
-      fireShot(p, msg.slot);
-    } else {
-      // Your shot was confirmed by server, phase transitions to flying automatically
-      state.phase = 'flying';
-    }
-  };
-
-  window.NetworkLayer.onResultConfirmed = (msg) => {
-    // Apply terrain changes
-    if (msg.terrainDiff) {
-      for (const diff of msg.terrainDiff) {
-        // terrainDiff is a simplified format; in a real game this would be more structured
-        // For now, we trust local physics already ran
-      }
-    }
-
-    // Apply HP deltas for non-shooter clients
-    if (msg.playerHpDeltas) {
-      for (const playerId in msg.playerHpDeltas) {
-        const p = getPlayer(playerId);
-        if (p) {
-          p.hp = Math.max(0, p.hp + msg.playerHpDeltas[playerId]);
-        }
-      }
-    }
-
-    // Mark eliminated players
-    if (msg.eliminated && Array.isArray(msg.eliminated)) {
-      for (const playerId of msg.eliminated) {
-        const p = getPlayer(playerId);
-        if (p) p.alive = false;
-      }
-    }
-  };
-
-  window.NetworkLayer.onGameOver = (msg) => {
-    state.phase = 'gameover';
-    state.winner = msg.winningTeam;
-  };
-
-  window.NetworkLayer.onError = (err) => {
-    console.error('Network error:', err);
-    logMsg('Network error: ' + err.message);
-  };
-}
 
 // ============================================================
 // MAIN LOOP
@@ -1228,9 +1213,6 @@ update = function() {
 if (window.NostrLayer) {
   window.NostrLayer.init().catch(e => console.warn('Nostr init failed:', e));
 }
-
-// Initialize network layer
-setupNetworkHandlers();
 
 // Kick off sprite loading immediately; the game loop renders fine before
 // they're ready (falls back to vector art per-mobile until each image loads).
