@@ -226,6 +226,7 @@ const NetworkLayer = {
     switch (msg.type) {
       case 'room_state':
         this.players = msg.players;
+        this.roomStatus = 'waiting_for_players';
         if (this.onRoomStateUpdated) this.onRoomStateUpdated(msg);
         break;
 
@@ -233,6 +234,7 @@ const NetworkLayer = {
         this.terrainSeed = msg.terrainSeed;
         this.roster = msg.roster;
         this.activePlayerId = msg.firstPlayerId;
+        this.roomStatus = 'in_progress';
         if (this.onMatchStarted) this.onMatchStarted(msg);
         break;
 

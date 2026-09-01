@@ -468,6 +468,8 @@ function resolveTurnEnd() {
       playerHpDeltas[player.id] = 0; // TODO: track actual deltas
     }
     window.NetworkLayer.sendShotResult(terrainDiff, playerHpDeltas, eliminated);
+    // Change to 'aiming' to prevent repeated calls, but server will advance turn
+    state.phase = 'aiming';
     return; // don't advance turn yet; server will coordinate that
   }
 
