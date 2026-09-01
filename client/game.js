@@ -1003,6 +1003,31 @@ window.ORBOUND_ROSTERS = {
   },
 };
 
+// Expose game state for Nostr integration
+window.ORBOUND_GAME_STATE = state;
+
+// Track gameover state for Nostr share button visibility
+let lastPhase = 'menu';
+const originalUpdate = update;
+update = function() {
+  originalUpdate();
+
+  // Detect phase transitions to gameover
+  if (state.phase !== lastPhase) {
+    if (state.phase === 'gameover' && window.NostrLayer) {
+      window.NostrLayer.showShareResultButton();
+    } else if (lastPhase === 'gameover' && window.NostrLayer) {
+      window.NostrLayer.hideShareResultButton();
+    }
+    lastPhase = state.phase;
+  }
+};
+
+// Initialize Nostr layer
+if (window.NostrLayer) {
+  window.NostrLayer.init().catch(e => console.warn('Nostr init failed:', e));
+}
+
 // Kick off sprite loading immediately; the game loop renders fine before
 // they're ready (falls back to vector art per-mobile until each image loads).
 if (window.SpriteLoader) {
