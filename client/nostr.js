@@ -53,6 +53,9 @@ const CURATED_RELAYS = [
   'wss://relay.minds.com',
   'wss://relay.orangepill.dev',
   'wss://relay.plebstr.com',
+  'wss://nostr.einundzwanzig.space',
+  'wss://relay.nostr.ch',
+  'wss://nostr.redimension.su',
 ];
 
 // State
