@@ -148,55 +148,62 @@ wss://relay.snort.social
 ```
 
 ### Additional 47 (opt-in, unchecked by default)
+
+All 50 relays (including the 3 defaults) were independently verified via a
+real NIP-01 WebSocket handshake (`REQ` + response) before being included in
+this list — not just DNS/HTTP reachability, but an actual working Nostr relay
+protocol exchange. Any candidate relay that failed to respond was excluded.
+
 ```
-wss://offchain.pub
-wss://nostr.band
-wss://nostr-pub.wellorder.net
+wss://bitcoiner.social
+wss://eden.nostr.land
+wss://haven.girino.org
+wss://knostr.neutrine.com
+wss://nostr.bitcoiner.social
+wss://nostr.chaima.info
+wss://nostr.corebreach.com
+wss://nostr.d11n.net
+wss://nostr.data.haus
+wss://nostr.easydns.ca
+wss://nostr.girino.org
+wss://nostr.jcloud.es
+wss://nostr.land
+wss://nostr.middling.mydns.jp
 wss://nostr.mom
-wss://relay.nostr.band
-wss://nostr.wine
-wss://relay.nostr.info
-wss://nostr.rocks
-wss://relay.nostr.vision
-wss://nostr.lu
+wss://nostr.noderunners.network
 wss://nostr.oxtr.dev
-wss://nostr.h3z.jp
-wss://relay.mostr.pub
-wss://nostr.fmt.wiz.biz
-wss://relay.current.fyi
-wss://nostr.zbd.gg
+wss://nostr.reelnetwork.eu
 wss://nostr.slothy.win
-wss://nostr.plebstr.com
-wss://nostr.ronaldstoner.com
-wss://nostr.scam
-wss://nostr.semisol.dev
-wss://nostr.spore.ws
-wss://nostr.swede.se
-wss://nostr.sysop.host
-wss://nostr.tokyo
-wss://nostr-1.naddr.top
-wss://nostr-2.naddr.top
-wss://nostr.thegrommet.xyz
-wss://nostr.tomharding.uk
-wss://nostr.tyranny.club
-wss://nostr.utxo.club
-wss://nostr.validator.social
-wss://nostr.vanderwarped.com
-wss://nostr.veeck.net
-wss://nostr.walleye.xyz
-wss://nostr.world
-wss://nostr.wrla.ch
-wss://nostr.yokai.live
-wss://nostr.zeph.me
-wss://relay.archmage.social
-wss://relay.stoner.com
-wss://relay.minds.com
-wss://relay.orangepill.dev
-wss://relay.plebstr.com
-wss://nostr.einundzwanzig.space
-wss://relay.nostr.ch
-wss://nostr.redimension.su
+wss://nostr.thank.eu
+wss://nostr.vulpem.com
+wss://nostr.wine
+wss://nostr21.com
+wss://offchain.pub
+wss://purplepag.es
+wss://purplerelay.com
+wss://relay.coinos.io
+wss://relay.disobey.dev
+wss://relay.dwadziesciajeden.pl
+wss://relay.getalby.com
+wss://relay.geyser.fund
+wss://relay.laantungir.net
+wss://relay.lexingtonbitcoin.org
+wss://relay.mostro.network
+wss://relay.noderunners.network
+wss://relay.nostr.info
+wss://relay.nostr.moe
+wss://relay.nostr.nu
+wss://relay.nostr.wirednet.jp
+wss://relay.nostrarabia.com
+wss://relay.nostrplebs.com
+wss://relay.orangepill.ovh
+wss://relay.piazza.today
+wss://relay.utxo.one
+wss://relay.wellorder.net
+wss://relay.westernbtc.com
+wss://soloco.nl
 ```
+
 
 **Audit result:** ✓ 0 primal.net domains, ✓ 47 distinct relays, ✓ all public/well-known
 
