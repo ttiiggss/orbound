@@ -1056,10 +1056,16 @@ function drawPowerMeter() {
   grad.addColorStop(1, C.PALETTE.hpRed);
   ctx.fillStyle = grad;
   ctx.fill();
-  ctx.fillStyle = C.PALETTE.uiText;
-  ctx.font = 'bold 14px Trebuchet MS';
+
+  // Display power % in the bar
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.font = 'bold 12px Trebuchet MS';
   ctx.textAlign = 'center';
-  ctx.fillText('HOLD SPACE / CLICK TO CHARGE, RELEASE TO FIRE', C.CANVAS_W / 2, y - 10);
+  ctx.fillText(Math.round(power) + '%', C.CANVAS_W / 2, y + 14);
+
+  ctx.fillStyle = C.PALETTE.uiText;
+  ctx.font = 'bold 12px Trebuchet MS';
+  ctx.fillText('Hold SPACE / Click to charge', C.CANVAS_W / 2, y - 10);
   ctx.textAlign = 'left';
 }
 
