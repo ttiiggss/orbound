@@ -15,8 +15,8 @@ const EXE = '/home/rjl/.cache/ms-playwright/chromium-1234/chrome-linux64/chrome'
   pageA.on('pageerror', e => errorsA.push(e.message));
   pageB.on('pageerror', e => errorsB.push(e.message));
 
-  await pageA.goto('http://localhost:8795/index.html', { waitUntil: 'load' });
-  await pageB.goto('http://localhost:8795/index.html', { waitUntil: 'load' });
+  await pageA.goto('http://localhost:8791/index.html', { waitUntil: 'load' });
+  await pageB.goto('http://localhost:8791/index.html', { waitUntil: 'load' });
   await pageA.waitForTimeout(300);
   await pageB.waitForTimeout(300);
 
