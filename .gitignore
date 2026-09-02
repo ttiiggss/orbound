@@ -5,3 +5,5 @@ __pycache__/
 *.log
 outputs/
 _tmp_*.json
+.vercel
+.env*
