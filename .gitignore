@@ -1,5 +1,7 @@
 node_modules/
 .venv/
+tools/.venv/
+__pycache__/
 *.log
 outputs/
 _tmp_*.json
