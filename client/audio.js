@@ -7,6 +7,8 @@
 const AudioFX = (() => {
   let audioContext = null;
   let initialized = false;
+  let fanfarePlayed = false;
+  let fanfareElement = null;
 
   // Safely initialize AudioContext on first user gesture
   function ensureContext() {
@@ -25,11 +27,35 @@ const AudioFX = (() => {
     }
   }
 
+  // Plays the AI-composed intro fanfare (ace_step_v1_3.5b via ComfyUI) once,
+  // on the same first-gesture unlock as the SFX AudioContext. Browsers block
+  // autoplay before user interaction, so this can't literally play the
+  // instant the page loads - it plays as soon as the player's first
+  // click/keypress/touch happens, which in practice is the moment they
+  // land on and start engaging with the title screen. Uses a plain
+  // HTMLAudioElement (not the Web Audio oscillator graph the SFX use) since
+  // it's real file playback, not synthesis.
+  function playTitleFanfare() {
+    if (fanfarePlayed) return;
+    fanfarePlayed = true;
+    try {
+      fanfareElement = new Audio('audio/title_fanfare.mp3');
+      fanfareElement.volume = 0.8;
+      const playPromise = fanfareElement.play();
+      if (playPromise && typeof playPromise.catch === 'function') {
+        playPromise.catch(e => console.warn('Title fanfare playback failed:', e));
+      }
+    } catch (e) {
+      console.warn('Failed to play title fanfare:', e);
+    }
+  }
+
   // Trigger on first user interaction
   function initOnFirstGesture() {
     if (initialized) return;
     initialized = true;
     ensureContext();
+    playTitleFanfare();
   }
 
   // Register for first user gesture
@@ -41,6 +67,7 @@ const AudioFX = (() => {
   }
 
   return {
+    playTitleFanfare,
     // Fire shot SFX — bright, crisp upward sweep with punch
     playFireShot() {
       const ctx = ensureContext();
