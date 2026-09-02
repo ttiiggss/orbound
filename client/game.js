@@ -1077,7 +1077,8 @@ function drawTeamStatus() {
 
 function drawTopBar() {
   ctx.save();
-  roundedRectPath(20, 16, 300, 64, 12);
+  const panelW = 300, panelX = (C.CANVAS_W - panelW) / 2;
+  roundedRectPath(panelX, 16, panelW, 64, 12);
   ctx.fillStyle = C.PALETTE.uiPanel;
   ctx.fill();
   ctx.lineWidth = 4;
@@ -1086,10 +1087,10 @@ function drawTopBar() {
 
   ctx.fillStyle = C.PALETTE.uiText;
   ctx.font = 'bold 16px Trebuchet MS';
-  ctx.fillText('WIND', 34, 38);
+  ctx.fillText('WIND', panelX + 14, 38);
   const windFrac = state.wind / C.WIND_MAX;
   ctx.save();
-  ctx.translate(150, 48);
+  ctx.translate(panelX + 130, 48);
   ctx.beginPath();
   ctx.arc(0, 0, 24, 0, Math.PI * 2);
   ctx.fillStyle = '#1a1330';
@@ -1105,11 +1106,11 @@ function drawTopBar() {
   ctx.stroke();
   ctx.restore();
 
-  ctx.fillText(`Turn: ${activePlayer() ? activePlayer().name : '-'}`, 190, 38);
+  ctx.fillText(`Turn: ${activePlayer() ? activePlayer().name : '-'}`, panelX + 170, 38);
   const p = activePlayer();
   if (p) {
     ctx.font = '13px Trebuchet MS';
-    ctx.fillText(`Angle ${Math.round(p.angle)}°  Pwr ${Math.round(p.power)}`, 190, 58);
+    ctx.fillText(`Angle ${Math.round(p.angle)}°  Pwr ${Math.round(p.power)}`, panelX + 170, 58);
   }
   ctx.restore();
 
