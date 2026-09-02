@@ -58,7 +58,12 @@ window.addEventListener('keydown', e => {
   keys[e.key] = true;
   handleKeyDown(e);
 });
-window.addEventListener('keyup', e => { keys[e.key] = false; });
+window.addEventListener('keyup', e => {
+  keys[e.key] = false;
+  // Releasing SPACE fires the shot, same as mouseup - lets players charge
+  // and fire entirely from the keyboard without touching the mouse.
+  if (e.key === ' ' && mouseDown) releaseCharge();
+});
 
 let mouseDown = false;
 let chargeStart = 0;
@@ -323,6 +328,10 @@ function handleKeyDown(e) {
   if (e.key === '2') currentWeaponSlot = 's2';
   if (e.key === '3') currentWeaponSlot = 'ss';
   if (e.key === ' ') { e.preventDefault(); beginCharge(); }
+  // A/D move left/right before firing (see stepPlayerMovement, called every
+  // frame from update() while held - not bound to arrow keys since those
+  // already control aim angle). Actual movement handling lives there so it
+  // feels continuous rather than one keypress = one step.
 }
 
 canvas.addEventListener('mousedown', () => { if (state.phase === 'aiming') beginCharge(); });
@@ -1141,7 +1150,7 @@ function drawPowerMeter() {
 
   ctx.fillStyle = C.PALETTE.uiText;
   ctx.font = 'bold 12px Trebuchet MS';
-  ctx.fillText('Hold SPACE / Click to charge', C.CANVAS_W / 2, y - 10);
+  ctx.fillText('Hold SPACE (or click) to charge, release to fire', C.CANVAS_W / 2, y - 10);
   ctx.textAlign = 'left';
 }
 
@@ -1411,13 +1420,13 @@ window.addEventListener('keydown', e => {
 // ============================================================
 const HOW_TO_PLAY_LINES = [
   '1. Select your mobile and adjust angle/power',
-  '2. Hold SPACE or CLICK to charge your shot',
-  '3. Release to fire!',
+  '2. Hold SPACE (or click) to charge your shot',
+  '3. Release SPACE (or click) to fire!',
   '',
   'Keys:',
   '  1/2/3  -  Select weapon (S1/S2/SS)',
   '  Arrow Keys  -  Adjust angle',
-  '  SPACE/Click  -  Charge and fire',
+  '  SPACE  -  Charge and fire (hold, then release)',
   '  R  -  Rematch',
   '',
   'Goal: Eliminate all opponents!',
